@@ -475,10 +475,17 @@ void updateCenterDisplay() {
 
   // Determine the text to display in the center circle
   if (waitingForGPS) {
-    centerText = "Wait GPS";
-    display.setFont(&FreeMonoBold9pt7b);
-  } else if (waitingForTakeoff && satellites >= 3) {
-    centerText = "Wait T/O";
+    if (satellites >= 4) {
+      waitingForGPS = false; // Transition out of "Wait GPS"
+      waitingForTakeoff = true; // Move to "Ready for Takeoff"
+    } else {
+      centerText = "Wait GPS";
+      display.setFont(&FreeMonoBold9pt7b);
+    }
+  }
+
+  if (waitingForTakeoff && satellites >= 4) {
+    centerText = "Ready T/O"; // Ready for Takeoff
     display.setFont(&FreeMonoBold9pt7b);
   } else if (homeSet) {
     // Format distance with 1 decimal place
@@ -576,43 +583,45 @@ void setNewHomePoint() {
     digitalWrite(PIN_MOTOR, HIGH);
     delay(200);
     digitalWrite(PIN_MOTOR, LOW);
-    
+
     // Save new home point
     homeLat = currentLat;
     homeLon = currentLon;
     homeSet = true;
-    
+
     // Save to EEPROM
     EEPROM.put(HOME_LAT_ADDR, homeLat);
     EEPROM.put(HOME_LON_ADDR, homeLon);
     EEPROM.commit();
-    
+
     // Update display to show confirmation
     display.updateWindow(CENTER_X - INNER_RADIUS, CENTER_Y - INNER_RADIUS, 
                          2 * INNER_RADIUS, 2 * INNER_RADIUS, true);
     display.fillCircle(CENTER_X, CENTER_Y, INNER_RADIUS - 1, GxEPD_WHITE);
-    
+
     display.setFont(&FreeMonoBold9pt7b);
     display.setTextColor(GxEPD_BLACK);
-    
+
     String message = "New home";
     int16_t tbx, tby; uint16_t tbw, tbh;
     display.getTextBounds(message, 0, 0, &tbx, &tby, &tbw, &tbh);
-    display.setCursor(CENTER_X - tbw/2, CENTER_Y - 5);
+    display.setCursor(CENTER_X - tbw / 2, CENTER_Y - 5);
     display.print(message);
-    
+
     message = "set";
     display.getTextBounds(message, 0, 0, &tbx, &tby, &tbw, &tbh);
-    display.setCursor(CENTER_X - tbw/2, CENTER_Y + 15);
+    display.setCursor(CENTER_X - tbw / 2, CENTER_Y + 15);
     display.print(message);
-    
+
     display.updateWindow(0, 0, 200, 200); // Full update for new home point
 
     delay(2000); // Show message for 2 seconds
-    
+
     // Reset distance and course calculations with new home
     distanceToHome = 0;
     updateCenterDisplay();
+  } else {
+    Serial.println("GPS location is invalid. Cannot set new home point.");
   }
 }
 
