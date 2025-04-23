@@ -35,8 +35,8 @@
 #define SCREEN_HEIGHT 200
 #define CENTER_X      100
 #define CENTER_Y      100
-#define OUTER_RADIUS  99   // 198/2
-#define INNER_RADIUS  55   // Increased by 20
+#define OUTER_RADIUS  89   // Reduced by 10px
+#define INNER_RADIUS  55   // Reduced by 5px
 #define MAX_DISTANCE  30   // km - when icon reaches outer position
 
 // Time constants - Optimized for faster updates
@@ -54,6 +54,13 @@
 #define ALT_CHANGE_THRESHOLD 5.0      // feet
 #define DISTANCE_CHANGE_THRESHOLD 0.1  // km
 #define HEADING_CHANGE_THRESHOLD 5.0   // degrees
+
+// Constants for battery calculation
+#define ADC_RESOLUTION 4095.0
+#define ADC_REFERENCE 3.3
+#define BAT_VOLTAGE_DIVIDER 2.0
+#define BAT_MIN_VOLTAGE 3.0
+#define BAT_MAX_VOLTAGE 4.2
 
 // Global variables
 GxIO_Class io(SPI, /*CS*/ EPD_CS, /*DC=*/EPD_DC, /*RST=*/EPD_RESET);
@@ -117,6 +124,7 @@ void setNewHomePoint();
 void prepareForSleep();
 void updateTextArea(int x, int y, int w, int h, char* text, int textX, int textY);
 void drawRotatingDot();
+int getBatteryPercent();
 
 void setup() {
   Serial.begin(115200);
@@ -137,7 +145,6 @@ void setup() {
   delay(100);
   GPSSerial.println("$PMTK220,200*2C"); // Set update rate to 5Hz (200ms)
 
-  
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
   
@@ -146,6 +153,10 @@ void setup() {
   display.setRotation(0);
   display.setTextColor(GxEPD_BLACK);
   display.setFont(&FreeMonoBold9pt7b);
+  
+  // Clear the display at startup
+  display.fillRect(0, 0, 200, 200, GxEPD_WHITE); // Draw a 200x200 white box
+  display.updateWindow(0, 0, 200, 200); // Partial update for the entire screen
   
   // Debug: Indicate display initialization
   Serial.println("Display initialized...");
@@ -158,8 +169,6 @@ void setup() {
   pinMode(PIN_KEY, INPUT_PULLUP);
   pinMode(PIN_MOTOR, OUTPUT);
   digitalWrite(PIN_MOTOR, LOW);
-  
-  
   
   // Load home position from EEPROM
   EEPROM.get(HOME_LAT_ADDR, homeLat);
@@ -233,12 +242,13 @@ void loop() {
 
   // Update BAT
   char buffer[10];
-  sprintf(buffer, "%d", (int)battery);
+  int batteryPercent = getBatteryPercent();
+  sprintf(buffer, "%d", batteryPercent);
   display.setCursor(0, 177);
   display.print(buffer);
 
   // Update SAT
-  if (gps.satellites.isValid()) {
+  if (gps.satellites.isValid() && gps.satellites.value() > 0) {
     sprintf(buffer, "%d", gps.satellites.value());
     display.setCursor(SCREEN_WIDTH - 20, 177);
     display.print(buffer);
@@ -584,22 +594,17 @@ void setNewHomePoint() {
 
 void updateBatteryLevel() {
   // LilyGO battery reading using the correct Bat_ADC pin
-  int rawValue = analogRead(Bat_ADC);
-  float voltage = (rawValue / 4095.0) * 2.0 * 3.3; // Voltage divider on board
-  
-  // Convert voltage to percentage (approximation for LiPo batteries)
-  // LiPo is ~3.7V nominal, with range from ~3.0V (empty) to ~4.2V (full)
-  float percentage = constrain(map(voltage * 100, 300, 420, 0, 100), 0, 100);
+  int batteryPercent = getBatteryPercent();
   
   // Only update display if battery level changed significantly
-  if (fabs(percentage - prevBattery) > 5.0 || prevBattery < 0) {
+  if (fabs(batteryPercent - prevBattery) > 5.0 || prevBattery < 0) {
     char buffer[5];
-    sprintf(buffer, "%d", (int)percentage);
+    sprintf(buffer, "%d", batteryPercent);
     updateTextArea(45, SCREEN_HEIGHT - 25, 40, 20, buffer, 45, SCREEN_HEIGHT - 10);
-    prevBattery = percentage;
+    prevBattery = batteryPercent;
   }
   
-  battery = percentage;
+  battery = batteryPercent;
 }
 
 void prepareForSleep() {
@@ -643,8 +648,8 @@ void setCustomCpuFrequencyMhz(uint32_t frequency) {
 void drawRotatingDot() {
   // Calculate the position of the rotating dot
   float radians = rotatingDotAngle * PI / 180.0;
-  int dotX = CENTER_X + int((INNER_RADIUS + 10) * cos(radians));
-  int dotY = CENTER_Y - int((INNER_RADIUS + 10) * sin(radians));
+  int dotX = CENTER_X + int((INNER_RADIUS + 15) * cos(radians)); // Moved 5px further out
+  int dotY = CENTER_Y - int((INNER_RADIUS + 15) * sin(radians));
 
   // Redraw the entire background
   drawBackground();
@@ -665,6 +670,47 @@ void drawRotatingDot() {
   display.setCursor(CENTER_X - tbw / 2, CENTER_Y + tbh / 2);
   display.print(centerText);
 
+  // Clear and update ALT (altitude)
+  display.fillRect(SCREEN_WIDTH - 40, 20, 40, 20, GxEPD_WHITE); // Clear old value
+  char buffer[10];
+  if (gps.altitude.isValid()) {
+    dtostrf(gps.altitude.meters() * 3.28084, 4, 0, buffer); // Convert to feet
+    display.setCursor(SCREEN_WIDTH - 40, 30);
+    display.print(buffer);
+  } else {
+    display.setCursor(SCREEN_WIDTH - 40, 30);
+    display.print("---");
+  }
+
+  // Clear and update KM (distance to home)
+  display.fillRect(0, 20, 40, 20, GxEPD_WHITE); // Clear old value
+  if (homeSet && gps.location.isValid()) {
+    dtostrf(distanceToHome, 4, 1, buffer);
+    display.setCursor(0, 30);
+    display.print(buffer);
+  } else {
+    display.setCursor(0, 30);
+    display.print("---");
+  }
+
+  // Clear and update BAT (battery level)
+  display.fillRect(0, 167, 40, 20, GxEPD_WHITE); // Clear old value
+  int batteryPercent = getBatteryPercent();
+  sprintf(buffer, "%d", batteryPercent);
+  display.setCursor(0, 177);
+  display.print(buffer);
+
+  // Clear and update SAT (satellite count)
+  display.fillRect(SCREEN_WIDTH - 40, 167, 40, 20, GxEPD_WHITE); // Clear old value
+  if (gps.satellites.isValid() && gps.satellites.value() > 0) {
+    sprintf(buffer, "%d", gps.satellites.value());
+    display.setCursor(SCREEN_WIDTH - 20, 177);
+    display.print(buffer);
+  } else {
+    display.setCursor(SCREEN_WIDTH - 20, 177);
+    display.print("---");
+  }
+
   // Draw the new dot
   display.fillCircle(dotX, dotY, 11, GxEPD_BLACK); // Dot size is 22px diameter (11px radius)
 
@@ -673,4 +719,13 @@ void drawRotatingDot() {
 
   // Increment the angle for the next frame
   rotatingDotAngle = (rotatingDotAngle + 5) % 360;
+}
+
+int getBatteryPercent() {
+    int adcValue = analogRead(Bat_ADC);
+    float voltage = (adcValue / ADC_RESOLUTION) * ADC_REFERENCE * BAT_VOLTAGE_DIVIDER;
+    int percent = (int)((voltage - BAT_MIN_VOLTAGE) / (BAT_MAX_VOLTAGE - BAT_MIN_VOLTAGE) * 100);
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    return percent;
 }
