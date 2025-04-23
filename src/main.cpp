@@ -143,7 +143,7 @@ void setup() {
   
   // Set GPS to higher update rate (if supported)
   delay(100);
-  GPSSerial.println("$PMTK220,200*2C"); // Set update rate to 5Hz (200ms)
+ // GPSSerial.println("$PMTK220,200*2C"); // Set update rate to 5Hz (200ms)
 
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
@@ -164,6 +164,8 @@ void setup() {
   // Enable power to peripherals
   pinMode(PWR_EN, OUTPUT);
   digitalWrite(PWR_EN, HIGH);
+
+  
   
   // Initialize button and motor with correct pins
   pinMode(PIN_KEY, INPUT_PULLUP);
@@ -199,11 +201,22 @@ void loop() {
   // Debug: Indicate loop start
   Serial.println("Loop started...");
 
-  // Read GPS data - process as much as possible for better responsiveness
+  // Continuously process GPS data
   while (GPSSerial.available() > 0) {
-    if (gps.encode(GPSSerial.read())) {
-      updateGPSData();
-      lastGPSTime = millis();
+    char c = GPSSerial.read();
+    gps.encode(c);
+
+    // Debug: Print raw GPS data
+    Serial.print(c);
+
+    // Update GPS time if available
+    if (gps.time.isUpdated() && gps.time.isValid()) {
+      Serial.print("GPS Time: ");
+      Serial.print(gps.time.hour());
+      Serial.print(":");
+      Serial.print(gps.time.minute());
+      Serial.print(":");
+      Serial.println(gps.time.second());
     }
   }
 
@@ -224,9 +237,12 @@ void loop() {
     dtostrf(gps.altitude.meters() * 3.28084, 4, 0, buffer); // Convert to feet
     display.setCursor(SCREEN_WIDTH - 40, 30);
     display.print(buffer);
+    Serial.print("Altitude (ft): ");
+    Serial.println(buffer);
   } else {
     display.setCursor(SCREEN_WIDTH - 40, 30);
     display.print("---");
+    Serial.println("Altitude: ---");
   }
 
   // Update KM (distance to home)
@@ -235,9 +251,12 @@ void loop() {
     dtostrf(distanceToHome, 4, 1, buffer);
     display.setCursor(0, 30);
     display.print(buffer);
+    Serial.print("Distance to Home (km): ");
+    Serial.println(buffer);
   } else {
     display.setCursor(0, 30);
     display.print("---");
+    Serial.println("Distance to Home: ---");
   }
 
   // Update BAT
@@ -246,15 +265,20 @@ void loop() {
   sprintf(buffer, "%d", batteryPercent);
   display.setCursor(0, 177);
   display.print(buffer);
+  Serial.print("Battery (%): ");
+  Serial.println(buffer);
 
   // Update SAT
   if (gps.satellites.isValid() && gps.satellites.value() > 0) {
     sprintf(buffer, "%d", gps.satellites.value());
     display.setCursor(SCREEN_WIDTH - 20, 177);
     display.print(buffer);
+    Serial.print("Satellites: ");
+    Serial.println(buffer);
   } else {
     display.setCursor(SCREEN_WIDTH - 20, 177);
     display.print("---");
+    Serial.println("Satellites: ---");
   }
 
   // Perform a partial update for the entire screen
