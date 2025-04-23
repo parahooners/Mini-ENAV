@@ -189,7 +189,7 @@ void setup() {
 void loop() {
   // Debug: Indicate loop start
   Serial.println("Loop started...");
-  
+
   // Read GPS data - process as much as possible for better responsiveness
   while (GPSSerial.available() > 0) {
     if (gps.encode(GPSSerial.read())) {
@@ -197,50 +197,61 @@ void loop() {
       lastGPSTime = millis();
     }
   }
-  
+
   // Handle rotating dot while waiting for GPS
   if (waitingForGPS) {
     drawRotatingDot();
     delay(100); // Control the speed of rotation
     return; // Skip the rest of the loop while waiting for GPS
   }
-  
-  // Check for GPS timeout
-  if (millis() - lastGPSTime > GPS_TIMEOUT && !waitingForGPS) {
-    waitingForGPS = true;
-    needsFullRedraw = true;
+
+  // Update ALT, KM, BAT, and SAT values
+  display.fillScreen(GxEPD_WHITE); // Clear the screen
+  drawBackground(); // Redraw the background
+
+  // Update ALT
+  if (gps.altitude.isValid()) {
+    char buffer[10];
+    dtostrf(gps.altitude.meters() * 3.28084, 4, 0, buffer); // Convert to feet
+    display.setCursor(SCREEN_WIDTH - 40, 30);
+    display.print(buffer);
+  } else {
+    display.setCursor(SCREEN_WIDTH - 40, 30);
+    display.print("---");
   }
-  
-  // Check button using the correct PIN_KEY (debounce built in)
-  static unsigned long lastButtonPressTime = 0;
-  if (digitalRead(PIN_KEY) == LOW && (millis() - lastButtonPressTime > 500)) {
-    lastButtonPressTime = millis();
-    setNewHomePoint();
+
+  // Update KM (distance to home)
+  if (homeSet && gps.location.isValid()) {
+    char buffer[10];
+    dtostrf(distanceToHome, 4, 1, buffer);
+    display.setCursor(0, 30);
+    display.print(buffer);
+  } else {
+    display.setCursor(0, 30);
+    display.print("---");
   }
-  
-  // Check for movement (using speed as indicator)
-  if (currentSpeed > 1.0) { // Moving faster than 1 km/h
-    isMoving = true;
-    lastMovementTime = millis();
-  } else if (isMoving && (millis() - lastMovementTime > SLEEP_TIMEOUT)) {
-    prepareForSleep();
+
+  // Update BAT
+  char buffer[10];
+  sprintf(buffer, "%d", (int)battery);
+  display.setCursor(0, 177);
+  display.print(buffer);
+
+  // Update SAT
+  if (gps.satellites.isValid()) {
+    sprintf(buffer, "%d", gps.satellites.value());
+    display.setCursor(SCREEN_WIDTH - 20, 177);
+    display.print(buffer);
+  } else {
+    display.setCursor(SCREEN_WIDTH - 20, 177);
+    display.print("---");
   }
-  
-  // Update battery level - less frequently to reduce ADC load
-  static unsigned long lastBatteryCheckTime = 0;
-  if (millis() - lastBatteryCheckTime >= 30000) { // 30 seconds
-    updateBatteryLevel();
-    lastBatteryCheckTime = millis();
-  }
-  
-  // Regular display update at defined intervals
-  if (millis() - lastUpdateTime >= UPDATE_INTERVAL) {
-    // Debug: Indicate display update
-    Serial.println("Updating display...");
-    
-    // Only trigger full display update if any changes happen
-    lastUpdateTime = millis();
-  }
+
+  // Perform a partial update for the entire screen
+  display.updateWindow(0, 0, 200, 200);
+
+  // Debug: Indicate loop end
+  Serial.println("Loop completed...");
 }
 
 void updateGPSData() {
@@ -386,17 +397,19 @@ void drawBackground() {
 
 void drawRingWithGaps(int radius) {
   // Draw arcs with gaps at the top, bottom, left, and right
-  for (int angle = 30; angle <= 60; angle++) {
-    drawArcSegment(radius, angle);
-  }
-  for (int angle = 120; angle <= 150; angle++) {
-    drawArcSegment(radius, angle);
-  }
-  for (int angle = 210; angle <= 240; angle++) {
-    drawArcSegment(radius, angle);
-  }
-  for (int angle = 300; angle <= 330; angle++) {
-    drawArcSegment(radius, angle);
+  for (int i = 0; i < 3; i++) { // Make the ring 3px thick
+    for (int angle = 30; angle <= 60; angle++) {
+      drawArcSegment(radius - i, angle);
+    }
+    for (int angle = 120; angle <= 150; angle++) {
+      drawArcSegment(radius - i, angle);
+    }
+    for (int angle = 210; angle <= 240; angle++) {
+      drawArcSegment(radius - i, angle);
+    }
+    for (int angle = 300; angle <= 330; angle++) {
+      drawArcSegment(radius - i, angle);
+    }
   }
 }
 
@@ -635,6 +648,22 @@ void drawRotatingDot() {
 
   // Redraw the entire background
   drawBackground();
+
+  // Redraw the mid and two-thirds rings with gaps (3px thick)
+  int midRadius = INNER_RADIUS + (OUTER_RADIUS - INNER_RADIUS) / 3;
+  int twoThirdsRadius = INNER_RADIUS + 2 * (OUTER_RADIUS - INNER_RADIUS) / 3;
+  drawRingWithGaps(midRadius);
+  drawRingWithGaps(twoThirdsRadius);
+
+  // Draw the "Wait GPS" text in the center
+  display.setFont(&FreeMonoBold9pt7b);
+  display.setTextColor(GxEPD_BLACK);
+  String centerText = "Wait GPS";
+  int16_t tbx, tby;
+  uint16_t tbw, tbh;
+  display.getTextBounds(centerText, 0, 0, &tbx, &tby, &tbw, &tbh);
+  display.setCursor(CENTER_X - tbw / 2, CENTER_Y + tbh / 2);
+  display.print(centerText);
 
   // Draw the new dot
   display.fillCircle(dotX, dotY, 11, GxEPD_BLACK); // Dot size is 22px diameter (11px radius)
