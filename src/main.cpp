@@ -652,7 +652,7 @@ void prepareForSleep() {
   // Power down peripherals to save battery
   digitalWrite(PWR_EN, LOW);
   digitalWrite(Backlight, LOW);
-  //digitalWrite(GPS_RES, LOW);  // Turn off GPS
+ 
   
   // Enter deep sleep
   esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_KEY, 0); // Wake on button press
