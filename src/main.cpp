@@ -668,9 +668,6 @@ void prepareForSleep() {
   // Wait for 2 seconds to show the message
   delay(2000);
 
-  // Ensure display is finished and in low power state before sleeping
-  display.hibernate(); // Add this line
-
   // Power down peripherals
   digitalWrite(PWR_EN, LOW);
   digitalWrite(Backlight, LOW); // Assuming Backlight pin is defined and used
