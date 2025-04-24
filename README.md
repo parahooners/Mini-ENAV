@@ -2,8 +2,8 @@
 
 ![image](https://github.com/Matt-Builder/Mini-ENAV/assets/101741817/9301517d-9378-428d-864c-731024342442)
 <!-- Add placeholders for the new images. Replace YOUR_IMAGE_URL_1/2 with the actual URLs -->
-![Image 1 Alt Text](YOUR_IMAGE_URL_1)
-![Image 2 Alt Text](YOUR_IMAGE_URL_2)
+![Mini ENAV Display](https://github.com/parahooners/Mini-ENAV/blob/main/include/Photos/image0.png?raw=true)
+![Mini ENAV Watch](https://github.com/parahooners/Mini-ENAV/blob/main/include/Photos/image1.jpeg?raw=true)
 
 Ever wandered off the beaten path and wished you had a super simple way to point back home? Whether you're hiking a mountain trail 🌲, paddling across a lake 🛶, backpacking through the wilderness 🎒, walking the dog in a new park 🐕, or even flying your paramotor 🪂, the Mini ENAV has got your back!
 
