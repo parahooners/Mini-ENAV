@@ -11,6 +11,8 @@
 #include <Wire.h>
 #include "esp_pm.h"
 #include "tahoma20pt7b.h" // Include the new font file
+#include "tahoma15pt7b.h" // Include the 15pt font file
+#include "tahoma10pt7b.h" // Include the 10pt font file
 
 // Correct pin definitions for LilyGO E-Paper Watch
 #define GPS_RX 21
@@ -53,7 +55,7 @@
 // Change detection thresholds
 #define SPEED_CHANGE_THRESHOLD 1.0     // km/h
 #define ALT_CHANGE_THRESHOLD 5.0      // feet
-#define DISTANCE_CHANGE_THRESHOLD 0.1  // km
+#define DISTANCE_CHANGE_THRESHOLD 0.001 // km (Reduced to 1 meter sensitivity)
 #define HEADING_CHANGE_THRESHOLD 5.0   // degrees
 
 // Constants for battery calculation
@@ -238,22 +240,29 @@ void loop() {
         lastUpdateTime = currentTime;
 
         display.fillScreen(GxEPD_WHITE);
+        // Set default font before drawing background (which might reset it)
+        display.setFont(&FreeMonoBold9pt7b);
         drawBackground();
 
-        // --- Altitude Display (Top Right - Adjusted Position) ---
+        // --- Altitude Display (Top Right - Adjusted Position & Font) ---
+        display.setFont(&tahoma10pt7b); // Set font for Altitude to 10pt
         if (gps.altitude.isValid()) {
             char buffer[10];
-            dtostrf(gps.altitude.meters() * 3.28084, 4, 0, buffer);
-            display.setCursor(SCREEN_WIDTH - 60, 20);
+            dtostrf(gps.altitude.meters() * 3.28084, 4, 0, buffer); // Calculation is in feet
+            // Adjust Y position for tahoma10pt7b baseline and move X left 5px
+            display.setCursor(SCREEN_WIDTH - 65, 20); // X = 200-60-5=135, Y=20
             display.print(buffer);
             Serial.print("Altitude (ft): "); Serial.println(buffer);
         } else {
-            display.setCursor(SCREEN_WIDTH - 60, 20); display.print("---");
+            // Adjust Y position for placeholder and move X left 5px
+            display.setCursor(SCREEN_WIDTH - 65, 20); display.print("---");
             Serial.println("Altitude: ---");
         }
+        // Reset font if other elements expect the default
+        display.setFont(&FreeMonoBold9pt7b);
 
         // --- Battery Display (Bottom Left) ---
-        char buffer[10];
+        char buffer[10]; // Re-declare buffer locally
         int batteryPercent = getBatteryPercent();
         sprintf(buffer, "%d", batteryPercent);
         display.setCursor(0, 177);
@@ -262,7 +271,7 @@ void loop() {
 
         // --- Satellites Display (Bottom Right) ---
         if (satellites > 0) {
-            sprintf(buffer, "%d", satellites);
+            sprintf(buffer, "%d", satellites); // Reuse buffer
             display.setCursor(SCREEN_WIDTH - 20, 177);
             display.print(buffer);
             Serial.print("Satellites: "); Serial.println(buffer);
@@ -271,7 +280,7 @@ void loop() {
             Serial.println("Satellites: ---");
         }
 
-        updateCenterDisplay();
+        updateCenterDisplay(); // This function sets its own fonts
 
         if (homeSet) {
             updateDirectionIndicators();
@@ -291,12 +300,15 @@ void loop() {
 
 void updateGPSData() {
   bool dataChanged = false;
+  bool locationValid = gps.location.isValid(); // Check validity once
 
-  if (gps.location.isUpdated() && gps.location.isValid()) {
+  if (gps.location.isUpdated() && locationValid) {
     currentLat = gps.location.lat();
     currentLon = gps.location.lng();
     Serial.print("Location Updated: Lat="); Serial.print(currentLat, 6); Serial.print(", Lon="); Serial.println(currentLon, 6);
     dataChanged = true;
+  } else if (gps.location.isUpdated() && !locationValid) {
+      Serial.println("Location Updated but INVALID.");
   }
 
   if (gps.altitude.isUpdated() && gps.altitude.isValid()) {
@@ -350,25 +362,41 @@ void updateGPSData() {
     }
   }
 
-  if (homeSet && gps.location.isValid()) {
+  // --- Distance and Course to Home Calculation ---
+  if (homeSet && locationValid) { // Only calculate if home is set AND current location is valid
     double newDistance = TinyGPSPlus::distanceBetween(
-      currentLat, currentLon, homeLat, homeLon) / 1000.0;
+      currentLat, currentLon, homeLat, homeLon) / 1000.0; // Distance in KM
 
     double newCourseToHome = TinyGPSPlus::courseTo(
       currentLat, currentLon, homeLat, homeLon);
 
+    // --- Debugging Distance ---
+    Serial.print("Dist Check: Current Dist (km): "); Serial.print(distanceToHome, 4);
+    Serial.print(", New Calc Dist (km): "); Serial.print(newDistance, 4);
+    Serial.print(", Diff: "); Serial.print(fabs(newDistance - distanceToHome), 4);
+    Serial.print(", Threshold: "); Serial.println(DISTANCE_CHANGE_THRESHOLD);
+    // --- End Debugging ---
+
     if (fabs(newDistance - distanceToHome) > DISTANCE_CHANGE_THRESHOLD) {
       distanceToHome = newDistance;
-      prevDistance = distanceToHome;
-      Serial.print("Distance to Home Updated: "); Serial.println(distanceToHome);
+      prevDistance = distanceToHome; // Update previous value only when a change occurs
+      Serial.print(">>> Distance to Home Updated: "); Serial.println(distanceToHome, 4); // More precision
       dataChanged = true;
+    } else {
+      Serial.println("--- Distance change below threshold, not updating."); // Debug else case
     }
+
+    // --- Debugging Course ---
+    // (Optional: Add similar debugging for course if needed)
+    // --- End Debugging ---
 
     if (fabs(newCourseToHome - courseToHome) > HEADING_CHANGE_THRESHOLD) {
       courseToHome = newCourseToHome;
-      Serial.print("Course to Home Updated: "); Serial.println(courseToHome);
+      Serial.print(">>> Course to Home Updated: "); Serial.println(courseToHome);
       dataChanged = true;
     }
+  } else if (homeSet && !locationValid) {
+      Serial.println("Dist Calc Skipped: Home set, but current location INVALID.");
   }
 }
 
@@ -391,8 +419,8 @@ void updateCenterDisplay() {
           isMeters = true;
           Serial.print("Displaying distance in meters: "); Serial.println(distMeters);
       } else { // 500m or more
-          // Format distance in KM with 1 decimal place
-          dtostrf(distanceToHome, 4, 1, buffer); // e.g., 1.2, 12.3
+          // Format distance in KM with 1 decimal place, increased width to 5
+          dtostrf(distanceToHome, 5, 1, buffer); // e.g., 1.2, 12.3, 123.4
           isMeters = false;
           Serial.print("Displaying distance in KM: "); Serial.println(buffer);
       }
@@ -679,7 +707,7 @@ void drawRotatingDot() {
   drawBackground(); // Redraw static background elements (rings, labels)
 
   // Draw "Wait GPS" text in the center
-  display.setFont(&FreeMonoBold9pt7b);
+  display.setFont(&FreeMonoBold9pt7b); // Set font for "Wait GPS"
   display.setTextColor(GxEPD_BLACK);
   String centerText = "Wait GPS";
   int16_t tbx, tby; uint16_t tbw, tbh;
@@ -690,9 +718,11 @@ void drawRotatingDot() {
   // Draw live/placeholder values for corner fields
   char buffer[10];
 
-  // ALT - Show "---" while waiting (Adjusted Position)
-  display.setCursor(SCREEN_WIDTH - 60, 20);
+  // ALT - Show "---" while waiting (Adjusted Position & Font)
+  display.setFont(&tahoma10pt7b); // Set font for Altitude placeholder to 10pt
+  display.setCursor(SCREEN_WIDTH - 65, 20); // Adjust Y position and move X left 5px
   display.print("---");
+  display.setFont(&FreeMonoBold9pt7b); // Reset font
 
   // BAT - Show live value
   int batteryPercent = getBatteryPercent();
