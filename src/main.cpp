@@ -166,13 +166,19 @@ void setup() {
   pinMode(PWR_EN, OUTPUT);
   digitalWrite(PWR_EN, HIGH);
 
-  
-  
   // Initialize button and motor with correct pins
   pinMode(PIN_KEY, INPUT_PULLUP);
   pinMode(PIN_MOTOR, OUTPUT);
-  digitalWrite(PIN_MOTOR, LOW);
+  digitalWrite(PIN_MOTOR, LOW); // Motor is explicitly set to LOW here
   
+  // --- Add startup vibration ---
+  Serial.println("Vibrating motor on startup...");
+  digitalWrite(PIN_MOTOR, HIGH);
+  delay(150); // Vibrate for 150ms
+  digitalWrite(PIN_MOTOR, LOW);
+  Serial.println("Startup vibration complete.");
+  // --- End startup vibration ---
+
   // Load home position from EEPROM
   EEPROM.get(HOME_LAT_ADDR, homeLat);
   EEPROM.get(HOME_LON_ADDR, homeLon);
@@ -667,6 +673,9 @@ void prepareForSleep() {
 
   // Wait for 2 seconds to show the message
   delay(2000);
+
+  // Explicitly power down the display controller to retain the image
+  display.powerDown(); // Add this line
 
   // Power down peripherals
   digitalWrite(PWR_EN, LOW);
