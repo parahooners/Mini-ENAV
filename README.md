@@ -1,7 +1,6 @@
 # 🧭 Mini ENAV - Your Pocket Crow-Flies Navigator! 🧭
 
 ![image](https://github.com/Matt-Builder/Mini-ENAV/assets/101741817/9301517d-9378-428d-864c-731024342442)
-<!-- Add placeholders for the new images. Replace YOUR_IMAGE_URL_1/2 with the actual URLs -->
 ![Mini ENAV Display](https://github.com/parahooners/Mini-ENAV/blob/main/include/Photos/image0.png?raw=true)
 ![Mini ENAV Watch](https://github.com/parahooners/Mini-ENAV/blob/main/include/Photos/image1.jpeg?raw=true)
 
@@ -52,7 +51,7 @@ A 3D-printable case is available for this project.
 2. **Install [PlatformIO extension](https://platformio.org/install/ide?install=vscode)**
 3. **Clone this repository**
    ```
-   git clone https://github.com/yourusername/mini-enav.git
+   git clone https://github.com/parahooners/Mini-ENAV.git
    ```
 4. **Open the project folder in VSCode**
 5. **Connect your ESP32 device via USB**
