@@ -63,7 +63,7 @@
 #define ADC_REFERENCE 3.3
 #define BAT_VOLTAGE_DIVIDER 2.0
 #define BAT_MIN_VOLTAGE 3.0
-#define BAT_MAX_VOLTAGE 4.2
+#define BAT_MAX_VOLTAGE 3.7 // Adjusted from 4.2 based on observation
 
 // Global variables
 GxIO_Class io(SPI, /*CS*/ EPD_CS, /*DC=*/EPD_DC, /*RST=*/EPD_RESET);
@@ -668,8 +668,8 @@ void prepareForSleep() {
   display.setCursor(CENTER_X - tbw/2, CENTER_Y + tbh/2);
   display.print(message);
 
-  // Update the full display to show the message
-  display.updateWindow(0, 0, 200, 200);
+  // Update the full display to show the message - Use blocking update
+  display.update(); // Changed from updateWindow(0, 0, 200, 200)
 
   // Wait for 2 seconds to show the message
   delay(2000);
