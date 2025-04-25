@@ -40,7 +40,7 @@ This project turns a nifty little LilyGO E-Paper Watch into a minimalist navigat
 ## 3D-Printed Case
 
 A 3D-printable case is available for this project.  
-**[Download STL files here](./case/)** (add your STL files to a `case/` folder in the repo).
+**[Download STL files here (GitHub)](https://github.com/parahooners/Mini-ENAV/tree/main/include/STL%20files%20for%20case)**
 
 > **Note:** To fit the watch into the provided 3D case, you will need to use a **half-size GPS antenna**. The standard antenna that comes with the watch is too large.
 
