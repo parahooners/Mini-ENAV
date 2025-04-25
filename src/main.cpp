@@ -87,6 +87,15 @@ double distanceToHome = 0.0;
 double courseToHome = 0.0;
 double currentCourse = 0.0;
 
+// --- New Takeoff Point Variables ---
+double takeoffLat = 0.0;
+double takeoffLon = 0.0;
+bool takeoffSet = false;
+double distanceToTakeoff = 0.0;
+double courseToTakeoff = 0.0;
+bool initialFixProcessed = false; // Flag to process takeoff point only once
+// --- End New Takeoff Point Variables ---
+
 // Previous values for change detection
 double prevSpeed = -1.0;
 double prevAlt = -1.0;
@@ -120,7 +129,7 @@ void drawRingWithGaps(int radius);
 void drawArcSegment(int radius, int angle);
 void updateGPSData();
 void updateCenterDisplay();
-void updateDirectionIndicators();
+void updateNavigationIndicators();
 void setNewHomePoint();
 void prepareForSleep();
 void updateTextArea(int x, int y, int w, int h, char* text, int textX, int textY);
@@ -288,8 +297,8 @@ void loop() {
 
         updateCenterDisplay(); // This function sets its own fonts
 
-        if (homeSet) {
-            updateDirectionIndicators();
+        if (homeSet || takeoffSet) {
+            updateNavigationIndicators();
         }
 
         display.updateWindow(0, 0, 200, 200); // Partial update for the entire screen
@@ -313,6 +322,21 @@ void updateGPSData() {
     currentLon = gps.location.lng();
     Serial.print("Location Updated: Lat="); Serial.print(currentLat, 6); Serial.print(", Lon="); Serial.println(currentLon, 6);
     dataChanged = true;
+
+    // --- Detect Takeoff Point ---
+    if (!initialFixProcessed && homeSet) {
+      double initialDistance = TinyGPSPlus::distanceBetween(
+        currentLat, currentLon, homeLat, homeLon) / 1000.0; // Distance in KM
+      if (initialDistance > 0.5) { // More than 500 meters
+        takeoffLat = currentLat;
+        takeoffLon = currentLon;
+        takeoffSet = true;
+        Serial.print("Takeoff point detected: Lat="); Serial.print(takeoffLat, 6);
+        Serial.print(", Lon="); Serial.println(takeoffLon, 6);
+      }
+      initialFixProcessed = true;
+    }
+    // --- End Detect Takeoff Point ---
   } else if (gps.location.isUpdated() && !locationValid) {
       Serial.println("Location Updated but INVALID.");
   }
@@ -376,33 +400,39 @@ void updateGPSData() {
     double newCourseToHome = TinyGPSPlus::courseTo(
       currentLat, currentLon, homeLat, homeLon);
 
-    // --- Debugging Distance ---
-    Serial.print("Dist Check: Current Dist (km): "); Serial.print(distanceToHome, 4);
-    Serial.print(", New Calc Dist (km): "); Serial.print(newDistance, 4);
-    Serial.print(", Diff: "); Serial.print(fabs(newDistance - distanceToHome), 4);
-    Serial.print(", Threshold: "); Serial.println(DISTANCE_CHANGE_THRESHOLD);
-    // --- End Debugging ---
-
     if (fabs(newDistance - distanceToHome) > DISTANCE_CHANGE_THRESHOLD) {
       distanceToHome = newDistance;
       prevDistance = distanceToHome; // Update previous value only when a change occurs
       Serial.print(">>> Distance to Home Updated: "); Serial.println(distanceToHome, 4); // More precision
       dataChanged = true;
-    } else {
-      Serial.println("--- Distance change below threshold, not updating."); // Debug else case
     }
-
-    // --- Debugging Course ---
-    // (Optional: Add similar debugging for course if needed)
-    // --- End Debugging ---
 
     if (fabs(newCourseToHome - courseToHome) > HEADING_CHANGE_THRESHOLD) {
       courseToHome = newCourseToHome;
       Serial.print(">>> Course to Home Updated: "); Serial.println(courseToHome);
       dataChanged = true;
     }
-  } else if (homeSet && !locationValid) {
-      Serial.println("Dist Calc Skipped: Home set, but current location INVALID.");
+  }
+
+  // --- Distance and Course to Takeoff Calculation ---
+  if (takeoffSet && locationValid) { // Only calculate if takeoff is set AND current location is valid
+    double newDistanceToTakeoff = TinyGPSPlus::distanceBetween(
+      currentLat, currentLon, takeoffLat, takeoffLon) / 1000.0; // Distance in KM
+
+    double newCourseToTakeoff = TinyGPSPlus::courseTo(
+      currentLat, currentLon, takeoffLat, takeoffLon);
+
+    if (fabs(newDistanceToTakeoff - distanceToTakeoff) > DISTANCE_CHANGE_THRESHOLD) {
+      distanceToTakeoff = newDistanceToTakeoff;
+      Serial.print(">>> Distance to Takeoff Updated: "); Serial.println(distanceToTakeoff, 4); // More precision
+      dataChanged = true;
+    }
+
+    if (fabs(newCourseToTakeoff - courseToTakeoff) > HEADING_CHANGE_THRESHOLD) {
+      courseToTakeoff = newCourseToTakeoff;
+      Serial.print(">>> Course to Takeoff Updated: "); Serial.println(courseToTakeoff);
+      dataChanged = true;
+    }
   }
 }
 
@@ -567,24 +597,70 @@ void updateTextArea(int x, int y, int w, int h, char* text, int textX, int textY
   display.print(text);
 }
 
-void updateDirectionIndicators() {
-  float relativeBearing = courseToHome - currentCourse;
-  if (relativeBearing < 0) relativeBearing += 360;
-  if (relativeBearing >= 360) relativeBearing -= 360;
+void updateNavigationIndicators() {
+  // --- Home Indicator ---
+  float relativeBearingHome = courseToHome - currentCourse;
+  if (relativeBearingHome < 0) relativeBearingHome += 360;
+  if (relativeBearingHome >= 360) relativeBearingHome -= 360;
 
-  float radians = relativeBearing * PI / 180.0;
+  float radiansHome = relativeBearingHome * PI / 180.0;
 
-  // Calculate icon position
-  int iconRadius = INNER_RADIUS + 15; // Fixed radius
-  int iconX = CENTER_X + int(iconRadius * sin(radians));
-  int iconY = CENTER_Y - int(iconRadius * cos(radians));
+  // Calculate icon position - moved out 1px
+  int iconRadiusHome = INNER_RADIUS + 16; // Fixed radius (was 15)
+  int iconXHome = CENTER_X + int(iconRadiusHome * sin(radiansHome));
+  int iconYHome = CENTER_Y - int(iconRadiusHome * cos(radiansHome));
+  int dotDrawRadiusHome = 15; // Was 13
 
-  // Draw new icon
-  display.fillCircle(iconX, iconY, 11, GxEPD_BLACK);
+  // Draw new icon - made 2px bigger (radius +2)
+  display.fillCircle(iconXHome, iconYHome, dotDrawRadiusHome, GxEPD_BLACK); // Use dotDrawRadius
 
-  // Update previous position (still useful if we revert to partial updates later)
-  prevIconX = iconX;
-  prevIconY = iconY;
+  // --- Add White 'H' inside the dot ---
+  display.setFont(&tahoma15pt7b); // Use larger 15pt font
+  display.setTextColor(GxEPD_WHITE);   // Set text color to white
+
+  String homeChar = "H";
+  int16_t tbx, tby; uint16_t tbw, tbh;
+  display.getTextBounds(homeChar, 0, 0, &tbx, &tby, &tbw, &tbh);
+
+  // Calculate position to center the 'H'
+  int textXHome = iconXHome - tbw / 2 - tbx; // Center horizontally
+  int textYHome = iconYHome + tbh / 2 - tby / 2 - 8; // Center vertically (approx) and move up 8px (was 6)
+
+  display.setCursor(textXHome, textYHome);
+  display.print(homeChar);
+
+  // --- Takeoff Indicator ---
+  if (takeoffSet) {
+    float relativeBearingTakeoff = courseToTakeoff - currentCourse;
+    if (relativeBearingTakeoff < 0) relativeBearingTakeoff += 360;
+    if (relativeBearingTakeoff >= 360) relativeBearingTakeoff -= 360;
+
+    float radiansTakeoff = relativeBearingTakeoff * PI / 180.0;
+
+    int iconRadiusTakeoff = INNER_RADIUS + 16; // Fixed radius (was 15)
+    int iconXTakeoff = CENTER_X + int(iconRadiusTakeoff * sin(radiansTakeoff));
+    int iconYTakeoff = CENTER_Y - int(iconRadiusTakeoff * cos(radiansTakeoff));
+    int dotDrawRadiusTakeoff = 15; // Was 13
+
+    display.fillCircle(iconXTakeoff, iconYTakeoff, dotDrawRadiusTakeoff, GxEPD_BLACK);
+
+    // --- Add White '1' inside the dot ---
+    display.setFont(&tahoma15pt7b); // Use larger 15pt font
+    display.setTextColor(GxEPD_WHITE);   // Set text color to white
+
+    String takeoffChar = "1";
+    int16_t tbxTakeoff, tbyTakeoff; uint16_t tbwTakeoff, tbhTakeoff;
+    display.getTextBounds(takeoffChar, 0, 0, &tbxTakeoff, &tbyTakeoff, &tbwTakeoff, &tbhTakeoff);
+
+    int textXTakeoff = iconXTakeoff - tbwTakeoff / 2 - tbxTakeoff; // Center horizontally
+    int textYTakeoff = iconYTakeoff + tbhTakeoff / 2 - tbyTakeoff / 2 - 8; // Center vertically (approx) and move up 8px (was 6)
+
+    display.setCursor(textXTakeoff, textYTakeoff);
+    display.print(takeoffChar);
+  }
+
+  // Reset text color to black for other drawing elements
+  display.setTextColor(GxEPD_BLACK);
 }
 
 void setNewHomePoint() {
@@ -596,6 +672,9 @@ void setNewHomePoint() {
     homeLat = gps.location.lat();
     homeLon = gps.location.lng();
     homeSet = true;
+
+    // Clear takeoff indicator when new Home is set
+    takeoffSet = false;
 
     EEPROM.put(HOME_LAT_ADDR, homeLat);
     EEPROM.put(HOME_LON_ADDR, homeLon);
