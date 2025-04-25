@@ -7,28 +7,102 @@
 
 Ever wandered off the beaten path and wished you had a super simple way to point back home? Whether you're hiking a mountain trail 🌲, paddling across a lake 🛶, backpacking through the wilderness 🎒, walking the dog in a new park 🐕, or even flying your paramotor 🪂, the Mini ENAV has got your back!
 
+---
+
 ## What's the Big Idea? 🤔
 
 This project turns a nifty little LilyGO E-Paper Watch into a minimalist navigation device. Forget complex maps! Mini ENAV focuses on one core mission: **getting you back to where you started.**
 
-## How it Works ✨
+---
 
-1.  **Find Your Spot:** Get to your starting point (your car, campsite, launch spot, etc.).
-2.  **Set Home:** Press and hold the button until the device vibrates. Boom! Home point saved. 🏡
-3.  **Adventure Time!** Go explore! Hike, fly, walk, paddle - do your thing!
-4.  **"Uh Oh, Which Way?"** Glance at your Mini ENAV.
-    *   The **big number** in the center shows your distance from home (in meters if you're close, kilometers if you're further out).
-    *   The **dot** around the edge points directly towards your saved home point, just like a compass pointing North, but this points *Home*! 🧭➡️🏡
-    *   You also get handy info like current speed (below distance), altitude (top right), battery level (bottom left), and GPS satellite count (bottom right).
-5.  **Follow the Dot:** Walk (or fly, or paddle!) in the direction the dot is pointing. As you get closer, the distance number will drop.
+## Features
 
-It's navigation boiled down to the basics: **distance and direction**. Perfect for when you just need a straight line back to safety or your starting point.
+- E-paper display (1.54" 200x200)
+- GPS navigation (TinyGPS++)
+- Return-to-home and takeoff point tracking
+- Battery and satellite status
+- Haptic feedback (vibration motor)
+- 3D-printable case
 
-## Hardware & Build Notes 🛠️
+---
 
-*   **Device:** This code is specifically for the LilyGO T-Watch with the E-Paper display (GxDEPG0150BN).
-*   **3D Printed Case:** You'll find STL files for a custom 3D printable case included in this repository! This helps protect the watch during your adventures.
-*   **GPS Antenna:** To fit the watch into the provided 3D case, you will need to use a **half-size GPS antenna**. The standard antenna that comes with the watch is too large.
+## Hardware
+
+- LilyGO E-Paper Watch (ESP32)
+- 1.54" GxEPD e-paper display
+- GPS module (connected to RX/TX)
+- Vibration motor
+- Battery (LiPo)
+- Button for setting home point
+
+---
+
+## 3D-Printed Case
+
+A 3D-printable case is available for this project.  
+**[Download STL files here](./case/)** (add your STL files to a `case/` folder in the repo).
+
+> **Note:** To fit the watch into the provided 3D case, you will need to use a **half-size GPS antenna**. The standard antenna that comes with the watch is too large.
+
+---
+
+## Build & Setup (VSCode + PlatformIO)
+
+1. **Install [Visual Studio Code](https://code.visualstudio.com/)**
+2. **Install [PlatformIO extension](https://platformio.org/install/ide?install=vscode)**
+3. **Clone this repository**
+   ```
+   git clone https://github.com/yourusername/mini-enav.git
+   ```
+4. **Open the project folder in VSCode**
+5. **Connect your ESP32 device via USB**
+6. **Select the correct serial port in PlatformIO (bottom bar)**
+7. **Build and upload the firmware**
+   - Click the "PlatformIO: Upload" button (checkmark/arrow icon)
+   - Or run:
+     ```
+     pio run --target upload
+     ```
+8. **Monitor serial output (optional)**
+   - Click "PlatformIO: Monitor" or run:
+     ```
+     pio device monitor
+     ```
+
+---
+
+## How to Operate the Mini ENAV
+
+1. **Power On:**  
+   Device starts and waits for GPS fix ("Wait GPS" message).
+2. **Set Home Point:**  
+   Press and hold the button until vibration. The current GPS location is saved as "Home".
+3. **Takeoff Point:**  
+   After moving >500m from Home, the device marks your takeoff location automatically.
+4. **Display Overview:**
+   - **Center:** Distance to Home (in meters if you're close, kilometers if you're further out). Speed shown below.
+   - **Top Right:** Altitude (feet)
+   - **Bottom Left:** Battery percentage
+   - **Bottom Right:** Number of satellites
+   - **Ring Dots:**  
+     - "H" = Home direction  
+     - "1" = Takeoff point direction
+5. **Follow the Dot:**  
+   Walk (or fly, or paddle!) in the direction the dot is pointing. As you get closer, the distance number will drop.
+6. **Sleep Mode:**  
+   Device sleeps after 10 minutes of inactivity. Press the button to wake.
+7. **Charging:**  
+   Charge via USB as per your ESP32 board's instructions.
+
+---
+
+## Notes
+
+- Ensure GPS has a clear view of the sky for best accuracy.
+- Battery voltage calibration may be needed for your hardware.
+- For 3D case printing, adjust STL scaling as needed for your printer and hardware tolerances.
+
+---
 
 ## Support the Project 🙏
 
@@ -36,4 +110,8 @@ If you find Mini ENAV useful and want to show your appreciation, you can buy me 
 
 <a href="https://buymeacoffee.com/hooners" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
-Happy Adventuring! 🎉
+---
+
+## License
+
+MIT License. See [LICENSE](./LICENSE) for details.
