@@ -49,10 +49,11 @@
 #define GPS_TIMEOUT 5000       // 5 seconds timeout for GPS data
 
 // EEPROM addresses
-#define EEPROM_SIZE 16
+#define EEPROM_SIZE 17 // Fix EEPROM size - needs to be 17 to store visibility flag
 #define HOME_LAT_ADDR 0
 #define HOME_LON_ADDR 8
 #define FUEL_LITRES_ADDR 12 // EEPROM address for fuelLitres (after homeLat/homeLon, so address 12)
+#define FUEL_VISIBLE_ADDR 16 // New EEPROM address after fuelLitres and fuelBurnRate
 
 // Change detection thresholds
 #define SPEED_CHANGE_THRESHOLD 1.0     // km/h
@@ -101,6 +102,7 @@ bool initialFixProcessed = false; // Flag to process takeoff point only once
 // Fuel variables
 float fuelLitres = 12.0;
 float fuelBurnRate = 4.8; // litres per hour
+bool fuelDisplayVisible = true; // Visibility toggle for fuel display
 unsigned long lastFuelUpdate = 0;
 const float FUEL_MIN = 5.0;
 const float FUEL_MAX = 20.0;
@@ -219,6 +221,12 @@ void setup() {
   EEPROM.get(FUEL_LITRES_ADDR, fuelLitres);
   if (fuelLitres < FUEL_MIN || fuelLitres > FUEL_MAX) fuelLitres = FUEL_MAX; // Default if not set
   
+  // Load fuel display visibility from EEPROM as uint8_t
+  uint8_t tempVisible = 1; // default to visible
+  EEPROM.get(FUEL_VISIBLE_ADDR, tempVisible);
+  fuelDisplayVisible = (tempVisible != 0);
+  Serial.printf("Loaded fuelDisplayVisible from EEPROM: %s\n", fuelDisplayVisible ? "true" : "false"); // DEBUG
+  
   // Initial full screen draw
   display.fillScreen(GxEPD_WHITE);
   drawBackground();
@@ -241,14 +249,13 @@ void loop() {
   // Debug: Indicate loop start
   Serial.println("Loop started...");
 
-  // Check if within 10 seconds of startup
   if (millis() - startTime <= 10000) {
       bool buttonDown = (digitalRead(PIN_KEY) == LOW);
 
       if (buttonDown) {
           // Transition to settings screen
-          display.fillRect(0, 0, 200, 200, GxEPD_WHITE); // Draw a 200x200 white box
-          display.updateWindow(0, 0, 200, 200);         // Full update
+          display.fillRect(0, 0, 200, 200, GxEPD_WHITE);
+          display.updateWindow(0, 0, 200, 200);
           enterSettingsScreen();
       }
   }
@@ -281,30 +288,25 @@ void loop() {
   // --- Button Handling Logic (Navigation Page) ---
   if (digitalRead(PIN_KEY) == LOW) {
       delay(50); // Debounce delay
-      if (digitalRead(PIN_KEY) == LOW) { // Confirm button is still pressed
+      if (digitalRead(PIN_KEY) == LOW) {
           unsigned long buttonPressStartTime = millis();
           bool actionTaken = false;
-
-          Serial.println("Button press detected. Holding...");
 
           while (digitalRead(PIN_KEY) == LOW) {
               // Check for long press (>= 5 seconds)
               if (!actionTaken && (millis() - buttonPressStartTime >= 5000)) {
                   Serial.println("Long press detected (>= 5s). Preparing for sleep...");
-                  prepareForSleep(); // Call the sleep function <--- THIS IS THE LONG PRESS ACTION
+                  prepareForSleep();
                   actionTaken = true;
                   break;
               }
               delay(20);
           }
 
-          // Button was released
-          Serial.println("Button released.");
-
           // If no action was taken (i.e., it wasn't a long press), treat as short press
           if (!actionTaken) {
               Serial.println("Short press action: Setting new home point.");
-              setNewHomePoint(); // <--- THIS IS THE SHORT PRESS ACTION
+              setNewHomePoint();
           }
           delay(200);
       }
@@ -615,8 +617,10 @@ void drawBackground() {
   // Draw satellite icon (Top Right)
   drawSatelliteIcon(175, 0, 25);
 
-  // Draw jerry can in the bottom-left corner
-  drawJerryCan(0, 160, 45, 38);
+  // Draw jerry can in the bottom-left corner if visible
+  if (fuelDisplayVisible) {
+    drawJerryCan(0, 160, 45, 38);
+  }
 }
 
 void drawRingWithGaps(int radius) {
@@ -892,6 +896,11 @@ void drawRotatingDot() {
   // Draw satellite icon (Top Right)
   drawSatelliteIcon(175, 0, 25);
 
+  // Only draw jerry can if visible - Fix for Wait GPS screen
+  if (fuelDisplayVisible) {
+    drawJerryCan(0, 160, 45, 38);
+  }
+
   // Draw the moving dot
   display.fillCircle(dotX, dotY, 11, GxEPD_BLACK);
 
@@ -1008,86 +1017,133 @@ void enterSettingsScreen() {
     bool adjustingLitres = true;
     unsigned long lastInteractionTime = millis();
     bool processed = true;
+    int settingStage = 0; // 0=Litres, 1=Burn Rate, 2=Visibility
 
     // Initial screen draw
     display.setFont(&tahoma15pt7b);
     display.fillScreen(GxEPD_WHITE);
+    
+    // Draw all three options
     display.setCursor(20, 50);
     display.print("Litres:");
     display.setCursor(120, 50);
     display.print(fuelLitres, 1);
+    
     display.setCursor(20, 100);
     display.print("Burn:");
     display.setCursor(120, 100);
     display.print(fuelBurnRate, 1);
-    display.drawRect(110, 30, 70, 30, GxEPD_BLACK);
+    
+    display.setCursor(20, 150);
+    display.print("Show:");
+    display.setCursor(120, 150);
+    display.print(fuelDisplayVisible ? "Yes" : "No");
+    
+    display.drawRect(110, 30, 70, 30, GxEPD_BLACK); // Initial selection box
     display.updateWindow(0, 0, 200, 200);
     
     while (true) {
-        // Button handling with minimal overhead
         if (!digitalRead(PIN_KEY)) {
             if (processed) {
                 processed = false;
                 lastInteractionTime = millis();
 
-                // Update values
-                if (adjustingLitres) {
-                    fuelLitres += 0.5;
-                    if (fuelLitres > FUEL_MAX) fuelLitres = FUEL_MIN;
-                } else {
-                    fuelBurnRate += 0.1;
-                    if (fuelBurnRate > 5.5) fuelBurnRate = 3.0;
+                Serial.printf("Settings Button Press: Stage %d\n", settingStage); // DEBUG
+
+                // Handle different settings based on stage
+                switch(settingStage) {
+                    case 0: // Litres
+                        fuelLitres += 0.5;
+                        if (fuelLitres > FUEL_MAX) fuelLitres = FUEL_MIN;
+                        Serial.printf("  New Litres: %.1f\n", fuelLitres); // DEBUG
+                        break;
+                    case 1: // Burn Rate
+                        fuelBurnRate += 0.1;
+                        if (fuelBurnRate > 5.5) fuelBurnRate = 3.0;
+                        Serial.printf("  New Burn Rate: %.1f\n", fuelBurnRate); // DEBUG
+                        break;
+                    case 2: // Visibility
+                        Serial.printf("  Before toggle: fuelDisplayVisible = %s\n", fuelDisplayVisible ? "true" : "false"); // DEBUG
+                        fuelDisplayVisible = !fuelDisplayVisible; // Toggle visibility
+                        Serial.printf("  After toggle: fuelDisplayVisible = %s\n", fuelDisplayVisible ? "true" : "false"); // DEBUG
+                        break;
                 }
 
                 // Quick vibration
                 digitalWrite(PIN_MOTOR, HIGH);
-                delayMicroseconds(30000); // 30ms vibration
+                delayMicroseconds(30000);
                 digitalWrite(PIN_MOTOR, LOW);
 
-                // Update display only on button press
+                // Update display immediately after change
                 display.fillScreen(GxEPD_WHITE);
                 display.setCursor(20, 50);
                 display.print("Litres:");
                 display.setCursor(120, 50);
                 display.print(fuelLitres, 1);
+                
                 display.setCursor(20, 100);
                 display.print("Burn:");
                 display.setCursor(120, 100);
                 display.print(fuelBurnRate, 1);
                 
-                if (adjustingLitres) {
-                    display.drawRect(110, 30, 70, 30, GxEPD_BLACK);
-                } else {
-                    display.drawRect(110, 80, 70, 30, GxEPD_BLACK);
+                display.setCursor(20, 150);
+                display.print("Show:");
+                display.setCursor(120, 150);
+                const char* showText = fuelDisplayVisible ? "Yes" : "No"; // Get text for debug
+                Serial.printf("  Printing Show: %s\n", showText); // DEBUG
+                display.print(showText); // Make sure this updates
+                
+                // Draw selection box based on current stage
+                switch(settingStage) {
+                    case 0: display.drawRect(110, 30, 70, 30, GxEPD_BLACK); break;
+                    case 1: display.drawRect(110, 80, 70, 30, GxEPD_BLACK); break;
+                    case 2: display.drawRect(110, 130, 70, 30, GxEPD_BLACK); break;
                 }
+                
                 display.updateWindow(0, 0, 200, 200);
             }
         } else {
             processed = true;
         }
 
-        // Check timeout with no delay
+        // Check timeout
         if (millis() - lastInteractionTime > 5000) {
-            if (adjustingLitres) {
-                adjustingLitres = false;
+            if (settingStage < 2) {
+                settingStage++;
                 lastInteractionTime = millis();
+                Serial.printf("Settings Timeout: Moving to Stage %d\n", settingStage); // DEBUG
                 
-                // Draw new selection box
+                // Redraw with new selection box
                 display.fillScreen(GxEPD_WHITE);
+                
                 display.setCursor(20, 50);
                 display.print("Litres:");
                 display.setCursor(120, 50);
                 display.print(fuelLitres, 1);
+                
                 display.setCursor(20, 100);
                 display.print("Burn:");
                 display.setCursor(120, 100);
                 display.print(fuelBurnRate, 1);
-                display.drawRect(110, 80, 70, 30, GxEPD_BLACK);
+                
+                display.setCursor(20, 150);
+                display.print("Show:");
+                display.setCursor(120, 150);
+                display.print(fuelDisplayVisible ? "Yes" : "No");
+                
+                // Draw correct selection box
+                switch(settingStage) {
+                    case 1: display.drawRect(110, 80, 70, 30, GxEPD_BLACK); break;
+                    case 2: display.drawRect(110, 130, 70, 30, GxEPD_BLACK); break;
+                }
                 display.updateWindow(0, 0, 200, 200);
             } else {
-                // Save and exit
+                Serial.println("Settings Timeout: Saving and restarting..."); // DEBUG
+                // Save all settings including visibility as uint8_t
                 EEPROM.put(FUEL_LITRES_ADDR, fuelLitres);
                 EEPROM.put(FUEL_LITRES_ADDR + 4, fuelBurnRate);
+                uint8_t visibleByte = fuelDisplayVisible ? 1 : 0;
+                EEPROM.put(FUEL_VISIBLE_ADDR, visibleByte);
                 EEPROM.commit();
                 ESP.restart();
             }
