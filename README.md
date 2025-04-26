@@ -95,6 +95,18 @@ A 3D-printable case is available for this project.
 
 ---
 
+## Settings Page
+
+The settings page is accessible only within the first 10 seconds after the unit starts up by pressing the button. On the settings page, you can:
+
+- Adjust the starting fuel litres (increments by 0.5).
+- Adjust the fuel burn rate (increments by 0.1).
+- Toggle the visibility of the Jerry Can and fuel litres display on the main navigation and GPS wait screens.
+
+To change a value, press the button while the selection box is on the desired setting. After 5 seconds of inactivity, the selection box moves to the next setting. When all settings are configured, the values are saved to EEPROM and the unit restarts.
+
+---
+
 ## Notes
 
 - Ensure GPS has a clear view of the sky for best accuracy.
@@ -110,6 +122,8 @@ If you find Mini ENAV useful and want to show your appreciation, you can buy me 
 <a href="https://buymeacoffee.com/hooners" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
 ---
+
+
 
 ## License
 
