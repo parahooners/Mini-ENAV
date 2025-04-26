@@ -179,6 +179,15 @@ void setup() {
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
   
+  // Uncomment this block to clear EEPROM, then comment it again after running once!
+  /*
+  for (int i = 0; i < EEPROM_SIZE; ++i) {
+      EEPROM.write(i, 0);
+  }
+  EEPROM.commit();
+  Serial.println("EEPROM cleared!");
+  */
+
   // Initialize display with optimized settings
   display.init(0); // false = partial updates possible
   display.setRotation(0);
@@ -218,7 +227,7 @@ void setup() {
   }
 
   // Load fuelLitres from EEPROM
-  EEPROM.get(FUEL_LITRES_ADDR, fuelLitres);
+  EEPROM.get(FUEL_LITRES_ADDR, fuelLitres); // EEPROM -> RAM
   if (fuelLitres < FUEL_MIN || fuelLitres > FUEL_MAX) fuelLitres = FUEL_MAX; // Default if not set
   
   // Load fuel display visibility from EEPROM as uint8_t
@@ -371,6 +380,10 @@ void loop() {
      Serial.println("Inactivity detected. Preparing for sleep...");
      prepareForSleep();
   }
+
+  // EEPROM is NOT accessed here:
+  // - No EEPROM.get() or EEPROM.put() or EEPROM.write() in the main loop
+  // - EEPROM is only accessed in setup() and in enterSettingsScreen(), and when setting a new home point
 }
 
 void updateGPSData() {
