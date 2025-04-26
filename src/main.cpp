@@ -14,6 +14,7 @@
 #include "tahoma15pt7b.h" // Include the 15pt font file
 #include "tahoma10pt7b.h" // Include the 10pt font file
 
+
 // Correct pin definitions for LilyGO E-Paper Watch
 #define GPS_RX 21
 #define GPS_TX 22
@@ -37,7 +38,7 @@
 #define SCREEN_WIDTH  200
 #define SCREEN_HEIGHT 200
 #define CENTER_X      100
-#define CENTER_Y      100
+#define CENTER_Y      90   // Shifted up 5 more px (was 95)
 #define OUTER_RADIUS  89   // Reduced by 10px
 #define INNER_RADIUS  55   // Reduced by 5px
 #define MAX_DISTANCE  30   // km - when icon reaches outer position
@@ -51,6 +52,7 @@
 #define EEPROM_SIZE 16
 #define HOME_LAT_ADDR 0
 #define HOME_LON_ADDR 8
+#define FUEL_LITRES_ADDR 12 // EEPROM address for fuelLitres (after homeLat/homeLon, so address 12)
 
 // Change detection thresholds
 #define SPEED_CHANGE_THRESHOLD 1.0     // km/h
@@ -63,7 +65,7 @@
 #define ADC_REFERENCE 3.3
 #define BAT_VOLTAGE_DIVIDER 2.0
 #define BAT_MIN_VOLTAGE 3.0
-#define BAT_MAX_VOLTAGE 3.7 // Adjusted from 4.2 based on observation
+#define BAT_MAX_VOLTAGE 3.9 // Adjusted from 3.7 to 3.9 for full charge
 
 // Global variables
 GxIO_Class io(SPI, /*CS*/ EPD_CS, /*DC=*/EPD_DC, /*RST=*/EPD_RESET);
@@ -96,6 +98,13 @@ double courseToTakeoff = 0.0;
 bool initialFixProcessed = false; // Flag to process takeoff point only once
 // --- End New Takeoff Point Variables ---
 
+// Fuel variables
+float fuelLitres = 12.0;
+float fuelBurnRate = 4.8; // litres per hour
+unsigned long lastFuelUpdate = 0;
+const float FUEL_MIN = 5.0;
+const float FUEL_MAX = 20.0;
+
 // Previous values for change detection
 double prevSpeed = -1.0;
 double prevAlt = -1.0;
@@ -108,6 +117,7 @@ float prevBattery = -1.0;
 unsigned long lastUpdateTime = 0;
 unsigned long lastMovementTime = 0;
 unsigned long lastGPSTime = 0;
+unsigned long startTime = 0; // Track startup time
 bool isMoving = false;
 bool needsFullRedraw = true;
 bool inDeepSleep = false;
@@ -120,6 +130,11 @@ int prevIconY = -1;
 
 // Global variable for rotating dot
 int rotatingDotAngle = 0;
+
+// Add debounce variables
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50; // 50ms debounce delay
+bool lastButtonState = HIGH; // Assume button is not pressed initially
 
 // Function prototypes
 void setCustomCpuFrequencyMhz(uint32_t frequency);
@@ -135,6 +150,10 @@ void prepareForSleep();
 void updateTextArea(int x, int y, int w, int h, char* text, int textX, int textY);
 void drawRotatingDot();
 int getBatteryPercent();
+void drawBatteryIcon(int x, int y, int width, int height, int percentage);
+void drawSatelliteIcon(int x, int y, int size);
+void drawJerryCan(int x, int y, int width, int height);
+void enterSettingsScreen();
 
 void setup() {
   Serial.begin(115200);
@@ -195,6 +214,10 @@ void setup() {
   if (homeLat != 0.0 && homeLon != 0.0) {
     homeSet = true;
   }
+
+  // Load fuelLitres from EEPROM
+  EEPROM.get(FUEL_LITRES_ADDR, fuelLitres);
+  if (fuelLitres < FUEL_MIN || fuelLitres > FUEL_MAX) fuelLitres = FUEL_MAX; // Default if not set
   
   // Initial full screen draw
   display.fillScreen(GxEPD_WHITE);
@@ -211,11 +234,24 @@ void setup() {
   lastUpdateTime = millis();
   lastMovementTime = millis();
   lastGPSTime = millis();
+  startTime = millis(); // Record startup time
 }
 
 void loop() {
   // Debug: Indicate loop start
   Serial.println("Loop started...");
+
+  // Check if within 10 seconds of startup
+  if (millis() - startTime <= 10000) {
+      bool buttonDown = (digitalRead(PIN_KEY) == LOW);
+
+      if (buttonDown) {
+          // Transition to settings screen
+          display.fillRect(0, 0, 200, 200, GxEPD_WHITE); // Draw a 200x200 white box
+          display.updateWindow(0, 0, 200, 200);         // Full update
+          enterSettingsScreen();
+      }
+  }
 
   // Continuously process GPS data
   while (GPSSerial.available() > 0) {
@@ -237,72 +273,94 @@ void loop() {
 
   // Handle display based on the current state
   if (waitingForGPS) {
-    drawRotatingDot();
-    delay(100);
+      drawRotatingDot();
+      delay(60); // Faster refresh for better animation
+      return;
+  }
+
+  // --- Button Handling Logic (Navigation Page) ---
+  if (digitalRead(PIN_KEY) == LOW) {
+      delay(50); // Debounce delay
+      if (digitalRead(PIN_KEY) == LOW) { // Confirm button is still pressed
+          unsigned long buttonPressStartTime = millis();
+          bool actionTaken = false;
+
+          Serial.println("Button press detected. Holding...");
+
+          while (digitalRead(PIN_KEY) == LOW) {
+              // Check for long press (>= 5 seconds)
+              if (!actionTaken && (millis() - buttonPressStartTime >= 5000)) {
+                  Serial.println("Long press detected (>= 5s). Preparing for sleep...");
+                  prepareForSleep(); // Call the sleep function <--- THIS IS THE LONG PRESS ACTION
+                  actionTaken = true;
+                  break;
+              }
+              delay(20);
+          }
+
+          // Button was released
+          Serial.println("Button released.");
+
+          // If no action was taken (i.e., it wasn't a long press), treat as short press
+          if (!actionTaken) {
+              Serial.println("Short press action: Setting new home point.");
+              setNewHomePoint(); // <--- THIS IS THE SHORT PRESS ACTION
+          }
+          delay(200);
+      }
+  }
+  // --- End Button Handling Logic ---
+
+  unsigned long currentTime = millis();
+  if (currentTime - lastUpdateTime >= UPDATE_INTERVAL) {
+      lastUpdateTime = currentTime;
+
+      display.fillScreen(GxEPD_WHITE);
+      display.setFont(&FreeMonoBold9pt7b);
+      drawBackground();
+
+      // --- Altitude Display (Bottom Center) ---
+      display.setFont(&tahoma10pt7b);
+      char altBuffer[10];
+      if (gps.altitude.isValid()) {
+          dtostrf(gps.altitude.meters() * 3.28084, 4, 0, altBuffer);
+          Serial.print("Altitude (ft): "); Serial.println(altBuffer);
+      } else {
+          strcpy(altBuffer, "---");
+          Serial.println("Altitude: ---");
+      }
+      int16_t alt_tbx, alt_tby; uint16_t alt_tbw, alt_tbh;
+      display.getTextBounds(altBuffer, 0, 0, &alt_tbx, &alt_tby, &alt_tbw, &alt_tbh);
+      int altX = CENTER_X - alt_tbw / 2;
+      int altY = 197; // Bottom center - moved down 5px
+      display.setCursor(altX, altY);
+      display.print(altBuffer);
+      // --- End Altitude Display ---
+
+      display.setFont(&FreeMonoBold9pt7b);
+
+      updateCenterDisplay(); // This function sets its own fonts
+
+      if (homeSet || takeoffSet) {
+          updateNavigationIndicators();
+      }
+
+      display.updateWindow(0, 0, 200, 200); // Partial update for the entire screen
+  }
+
+  // --- Fuel burn logic ---
+  unsigned long now = millis();
+  // Only burn fuel if speed > 5 mph (8.04672 km/h)
+  if (currentSpeed > 8.04672) {
+    if (lastFuelUpdate == 0) lastFuelUpdate = now;
+    float hoursElapsed = (now - lastFuelUpdate) / 3600000.0f;
+    if (hoursElapsed > 0) {
+      fuelLitres -= fuelBurnRate * hoursElapsed;
+      if (fuelLitres < 0) fuelLitres = 0;
+      lastFuelUpdate = now;
+    }
   } else {
-    if (digitalRead(PIN_KEY) == LOW) {
-        delay(50);
-        if (digitalRead(PIN_KEY) == LOW) {
-            setNewHomePoint();
-            while(digitalRead(PIN_KEY) == LOW) {
-                delay(10);
-            }
-        }
-    }
-
-    unsigned long currentTime = millis();
-    if (currentTime - lastUpdateTime >= UPDATE_INTERVAL) {
-        lastUpdateTime = currentTime;
-
-        display.fillScreen(GxEPD_WHITE);
-        // Set default font before drawing background (which might reset it)
-        display.setFont(&FreeMonoBold9pt7b);
-        drawBackground();
-
-        // --- Altitude Display (Top Right - Adjusted Position & Font) ---
-        display.setFont(&tahoma10pt7b); // Set font for Altitude to 10pt
-        if (gps.altitude.isValid()) {
-            char buffer[10];
-            dtostrf(gps.altitude.meters() * 3.28084, 4, 0, buffer); // Calculation is in feet
-            // Adjust Y position for tahoma10pt7b baseline and move X left 5px
-            display.setCursor(SCREEN_WIDTH - 65, 20); // X = 200-60-5=135, Y=20
-            display.print(buffer);
-            Serial.print("Altitude (ft): "); Serial.println(buffer);
-        } else {
-            // Adjust Y position for placeholder and move X left 5px
-            display.setCursor(SCREEN_WIDTH - 65, 20); display.print("---");
-            Serial.println("Altitude: ---");
-        }
-        // Reset font if other elements expect the default
-        display.setFont(&FreeMonoBold9pt7b);
-
-        // --- Battery Display (Bottom Left) ---
-        char buffer[10]; // Re-declare buffer locally
-        int batteryPercent = getBatteryPercent();
-        sprintf(buffer, "%d", batteryPercent);
-        display.setCursor(0, 177);
-        display.print(buffer);
-        Serial.print("Battery (%): "); Serial.println(buffer);
-
-        // --- Satellites Display (Bottom Right) ---
-        if (satellites > 0) {
-            sprintf(buffer, "%d", satellites); // Reuse buffer
-            display.setCursor(SCREEN_WIDTH - 20, 177);
-            display.print(buffer);
-            Serial.print("Satellites: "); Serial.println(buffer);
-        } else {
-            display.setCursor(SCREEN_WIDTH - 20, 177); display.print("---");
-            Serial.println("Satellites: ---");
-        }
-
-        updateCenterDisplay(); // This function sets its own fonts
-
-        if (homeSet || takeoffSet) {
-            updateNavigationIndicators();
-        }
-
-        display.updateWindow(0, 0, 200, 200); // Partial update for the entire screen
-    }
+    lastFuelUpdate = now; // Reset timer if not moving
   }
 
   // Check for sleep timeout - This should run on every loop iteration
@@ -425,13 +483,11 @@ void updateGPSData() {
     if (fabs(newDistanceToTakeoff - distanceToTakeoff) > DISTANCE_CHANGE_THRESHOLD) {
       distanceToTakeoff = newDistanceToTakeoff;
       Serial.print(">>> Distance to Takeoff Updated: "); Serial.println(distanceToTakeoff, 4); // More precision
-      dataChanged = true;
     }
 
     if (fabs(newCourseToTakeoff - courseToTakeoff) > HEADING_CHANGE_THRESHOLD) {
       courseToTakeoff = newCourseToTakeoff;
       Serial.print(">>> Course to Takeoff Updated: "); Serial.println(courseToTakeoff);
-      dataChanged = true;
     }
   }
 }
@@ -553,15 +609,14 @@ void drawBackground() {
   display.setFont(&FreeMonoBold9pt7b);
   display.setTextColor(GxEPD_BLACK); // Ensure color is set
 
-  // BAT label (bottom left)
-  display.setCursor(0, 197);
-  display.print("BAT");
+  // Draw battery icon (Top Left)
+  drawBatteryIcon(0, 0, 40, 20, getBatteryPercent()); // Corrected size
 
-  // SAT label (bottom right)
-  display.setCursor(SCREEN_WIDTH - 45, 197);
-  display.print("SAT");
+  // Draw satellite icon (Top Right)
+  drawSatelliteIcon(175, 0, 25);
 
-  Serial.println("Background drawn.");
+  // Draw jerry can in the bottom-left corner
+  drawJerryCan(0, 160, 45, 38);
 }
 
 void drawRingWithGaps(int radius) {
@@ -800,40 +855,49 @@ void drawRotatingDot() {
   String centerText = "Wait GPS";
   int16_t tbx, tby; uint16_t tbw, tbh;
   display.getTextBounds(centerText, 0, 0, &tbx, &tby, &tbw, &tbh);
-  display.setCursor(CENTER_X - tbw / 2, CENTER_Y + tbh / 2);
+  int waitGpsY = CENTER_Y + tbh / 2 - 5; // Slightly shift up Wait GPS text
+  display.setCursor(CENTER_X - tbw / 2, waitGpsY);
   display.print(centerText);
 
-  // Draw live/placeholder values for corner fields
-  char buffer[10];
+  // --- Battery Voltage Below "Wait GPS" (same font and color) ---
+  int adcValue = analogRead(Bat_ADC);
+  float voltage = (adcValue / ADC_RESOLUTION) * ADC_REFERENCE * BAT_VOLTAGE_DIVIDER;
+  char voltageBuffer[8];
+  dtostrf(voltage, 3, 1, voltageBuffer); // e.g., "3.7"
+  strcat(voltageBuffer, "V");
+  int16_t vtbx, vtby; uint16_t vtbw, vtbh;
+  display.getTextBounds(voltageBuffer, 0, 0, &vtbx, &vtby, &vtbw, &vtbh);
+  int voltageY = waitGpsY + tbh + 8; // 8px below Wait GPS text
+  display.setCursor(CENTER_X - vtbw / 2, voltageY);
+  display.print(voltageBuffer);
+  // --- End Battery Voltage Display ---
 
-  // ALT - Show "---" while waiting (Adjusted Position & Font)
-  display.setFont(&tahoma10pt7b); // Set font for Altitude placeholder to 10pt
-  display.setCursor(SCREEN_WIDTH - 65, 20); // Adjust Y position and move X left 5px
-  display.print("---");
-  display.setFont(&FreeMonoBold9pt7b); // Reset font
+  // --- Altitude Display (Bottom Center) ---
+  display.setFont(&tahoma10pt7b);
+  char altBuffer[10];
+  strcpy(altBuffer, "---");
+  int16_t alt_tbx, alt_tby; uint16_t alt_tbw, alt_tbh;
+  display.getTextBounds(altBuffer, 0, 0, &alt_tbx, &alt_tby, &alt_tbw, &alt_tbh);
+  int altX = CENTER_X - alt_tbw / 2;
+  int altY = 197; // Bottom center - moved down 5px
+  display.setCursor(altX, altY);
+  display.print(altBuffer);
+  // --- End Altitude Display ---
 
-  // BAT - Show live value
-  int batteryPercent = getBatteryPercent();
-  sprintf(buffer, "%d", batteryPercent);
-  display.setCursor(0, 177);
-  display.print(buffer);
+  display.setFont(&FreeMonoBold9pt7b);
 
-  // SAT - Show live value (or "---" if invalid/zero)
-  if (gps.satellites.isValid() && gps.satellites.value() > 0) {
-      sprintf(buffer, "%d", gps.satellites.value());
-      display.setCursor(SCREEN_WIDTH - 20, 177);
-      display.print(buffer);
-  } else {
-      display.setCursor(SCREEN_WIDTH - 20, 177);
-      display.print("---");
-  }
+  // Draw battery icon (Top Left)
+  drawBatteryIcon(0, 0, 40, 20, getBatteryPercent()); // Corrected size
+
+  // Draw satellite icon (Top Right)
+  drawSatelliteIcon(175, 0, 25);
 
   // Draw the moving dot
   display.fillCircle(dotX, dotY, 11, GxEPD_BLACK);
 
-  display.updateWindow(0, 0, 200, 200); // Full screen update for this state
+  display.updateWindow(0, 0, 200, 200);
 
-  rotatingDotAngle = (rotatingDotAngle + 10) % 360; // Slightly faster rotation
+  rotatingDotAngle = (rotatingDotAngle + 10) % 360;
 }
 
 int getBatteryPercent() {
@@ -843,4 +907,190 @@ int getBatteryPercent() {
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
     return percent;
+}
+
+void drawBatteryIcon(int x, int y, int width, int height, int percentage) {
+  // Draw the rounded rectangle outline of the battery
+  display.drawRoundRect(x, y, width, height, 4, GxEPD_BLACK); // Rounded corners
+
+  // Draw the positive terminal (now a bit smaller and offset)
+  display.fillRect(x + width + 1, y + height / 3, 2, height / 3, GxEPD_BLACK); // Smaller terminal
+
+  // Calculate the fill width based on the percentage
+  int fillWidth = (int)((float)(width - 6) * (float)percentage / 100.0); // Leave space for rounded corners
+
+  // Draw the fill rectangle (horizontal)
+  display.fillRect(x + 3, y + 3, fillWidth, height - 6, GxEPD_BLACK); // Fill with offset for rounded corners
+}
+
+void drawSatelliteIcon(int x, int y, int size) {
+  // Simple satellite representation (you can customize this)
+  int centerX = x + size / 2;
+  int centerY = y + size / 2;
+
+  // Body
+  display.drawCircle(centerX, centerY, size / 4, GxEPD_BLACK);
+
+  // Solar panels
+  display.fillRect(x, centerY - 2, size / 3, 4, GxEPD_BLACK);
+  display.fillRect(x + size * 2 / 3, centerY - 2, size / 3, 4, GxEPD_BLACK);
+
+  // Antenna
+  display.drawLine(centerX, centerY, centerX, y, GxEPD_BLACK);
+
+  // Display satellite count below the icon
+  display.setFont(&FreeMonoBold9pt7b);
+  display.setTextColor(GxEPD_BLACK);
+  char satBuffer[4];
+  if (gps.satellites.isValid()) {
+    sprintf(satBuffer, "%d", gps.satellites.value());
+  } else {
+    strcpy(satBuffer, "---");
+  }
+  int16_t tbx, tby; uint16_t tbw, tbh;
+  display.getTextBounds(satBuffer, 0, 0, &tbx, &tby, &tbw, &tbh);
+  int textX = x + (size - tbw) / 2 - 10; // Move 10px to the left
+  int textY = y + size + tbh;
+  display.setCursor(textX, textY);
+  display.print(satBuffer);
+}
+
+void drawJerryCan(int x, int y, int width, int height) {
+  // Ensure the can fits on screen
+  if (y + height > SCREEN_HEIGHT) {
+    height = SCREEN_HEIGHT - y;
+  }
+
+  // Body with diagonal top-right cut
+  int cut = width / 4;
+  display.drawLine(x, y + height, x, y, GxEPD_BLACK); // left
+  display.drawLine(x, y, x + width - cut, y, GxEPD_BLACK); // top left
+  display.drawLine(x + width - cut, y, x + width, y + cut, GxEPD_BLACK); // diagonal cut
+  display.drawLine(x + width, y + cut, x + width, y + height, GxEPD_BLACK); // right
+  display.drawLine(x + width, y + height, x, y + height, GxEPD_BLACK); // bottom
+
+  // Spout (angled, top-right)
+  int spoutLen = width / 4;
+  display.drawLine(x + width, y + cut, x + width + spoutLen / 2, y + cut - spoutLen / 2, GxEPD_BLACK);
+  display.drawLine(x + width + spoutLen / 2, y + cut - spoutLen / 2, x + width + spoutLen, y + cut, GxEPD_BLACK);
+
+  // Handle (set back from front edge)
+  int handleW = width / 3;
+  int handleH = height / 7;
+  int handleX = x + width - cut - handleW - 2;
+  int handleY = y + 2;
+  display.drawRoundRect(handleX, handleY, handleW, handleH, 3, GxEPD_BLACK);
+
+  // Small triangle in top-left
+  int tri = width / 5;
+  display.drawLine(x + 2, y + 2, x + tri, y + 2, GxEPD_BLACK);
+  display.drawLine(x + 2, y + 2, x + 2, y + tri, GxEPD_BLACK);
+  display.drawLine(x + tri, y + 2, x + 2, y + tri, GxEPD_BLACK);
+
+  // Draw the current fuel value in the can using tahoma10pt7b
+  char buf[8];
+  dtostrf(fuelLitres, 4, 1, buf); // e.g. "12.0"
+  display.setFont(&tahoma10pt7b);
+  display.setTextColor(GxEPD_BLACK);
+
+  int16_t tbx, tby;
+  uint16_t tbw, tbh;
+  display.getTextBounds(buf, 0, 0, &tbx, &tby, &tbw, &tbh);
+
+  int textX = x + (width - tbw) / 2 - tbx;
+  int textY = y + (height + tbh) / 2 - tby - 10; // Move up 10px
+
+  display.setCursor(textX, textY);
+  display.print(buf);
+}
+
+void enterSettingsScreen() {
+    bool adjustingLitres = true;
+    unsigned long lastInteractionTime = millis();
+    bool processed = true;
+
+    // Initial screen draw
+    display.setFont(&tahoma15pt7b);
+    display.fillScreen(GxEPD_WHITE);
+    display.setCursor(20, 50);
+    display.print("Litres:");
+    display.setCursor(120, 50);
+    display.print(fuelLitres, 1);
+    display.setCursor(20, 100);
+    display.print("Burn:");
+    display.setCursor(120, 100);
+    display.print(fuelBurnRate, 1);
+    display.drawRect(110, 30, 70, 30, GxEPD_BLACK);
+    display.updateWindow(0, 0, 200, 200);
+    
+    while (true) {
+        // Button handling with minimal overhead
+        if (!digitalRead(PIN_KEY)) {
+            if (processed) {
+                processed = false;
+                lastInteractionTime = millis();
+
+                // Update values
+                if (adjustingLitres) {
+                    fuelLitres += 0.5;
+                    if (fuelLitres > FUEL_MAX) fuelLitres = FUEL_MIN;
+                } else {
+                    fuelBurnRate += 0.1;
+                    if (fuelBurnRate > 5.5) fuelBurnRate = 3.0;
+                }
+
+                // Quick vibration
+                digitalWrite(PIN_MOTOR, HIGH);
+                delayMicroseconds(30000); // 30ms vibration
+                digitalWrite(PIN_MOTOR, LOW);
+
+                // Update display only on button press
+                display.fillScreen(GxEPD_WHITE);
+                display.setCursor(20, 50);
+                display.print("Litres:");
+                display.setCursor(120, 50);
+                display.print(fuelLitres, 1);
+                display.setCursor(20, 100);
+                display.print("Burn:");
+                display.setCursor(120, 100);
+                display.print(fuelBurnRate, 1);
+                
+                if (adjustingLitres) {
+                    display.drawRect(110, 30, 70, 30, GxEPD_BLACK);
+                } else {
+                    display.drawRect(110, 80, 70, 30, GxEPD_BLACK);
+                }
+                display.updateWindow(0, 0, 200, 200);
+            }
+        } else {
+            processed = true;
+        }
+
+        // Check timeout with no delay
+        if (millis() - lastInteractionTime > 5000) {
+            if (adjustingLitres) {
+                adjustingLitres = false;
+                lastInteractionTime = millis();
+                
+                // Draw new selection box
+                display.fillScreen(GxEPD_WHITE);
+                display.setCursor(20, 50);
+                display.print("Litres:");
+                display.setCursor(120, 50);
+                display.print(fuelLitres, 1);
+                display.setCursor(20, 100);
+                display.print("Burn:");
+                display.setCursor(120, 100);
+                display.print(fuelBurnRate, 1);
+                display.drawRect(110, 80, 70, 30, GxEPD_BLACK);
+                display.updateWindow(0, 0, 200, 200);
+            } else {
+                // Save and exit
+                EEPROM.put(FUEL_LITRES_ADDR, fuelLitres);
+                EEPROM.put(FUEL_LITRES_ADDR + 4, fuelBurnRate);
+                EEPROM.commit();
+                ESP.restart();
+            }
+        }
+    }
 }
