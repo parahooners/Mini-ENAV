@@ -1,6 +1,6 @@
 # 🧭 Mini ENAV - Your Pocket Crow-Flies Navigator! 🧭
 
-![image](https://github.com/Matt-Builder/Mini-ENAV/assets/101741817/9301517d-9378-428d-864c-731024342442)
+
 ![Mini ENAV Display](https://github.com/parahooners/Mini-ENAV/blob/main/include/Photos/image0.png?raw=true)
 ![Mini ENAV Watch](https://github.com/parahooners/Mini-ENAV/blob/main/include/Photos/image1.jpeg?raw=true)
 
