@@ -48,12 +48,13 @@
 #define SLEEP_TIMEOUT 600000   // 10 minutes in ms
 #define GPS_TIMEOUT 5000       // 5 seconds timeout for GPS data
 
-// EEPROM addresses
-#define EEPROM_SIZE 17 // Fix EEPROM size - needs to be 17 to store visibility flag
-#define HOME_LAT_ADDR 0
-#define HOME_LON_ADDR 8
-#define FUEL_LITRES_ADDR 12 // EEPROM address for fuelLitres (after homeLat/homeLon, so address 12)
-#define FUEL_VISIBLE_ADDR 16 // New EEPROM address after fuelLitres and fuelBurnRate
+// EEPROM addresses (no overlap!)
+#define EEPROM_SIZE 25 // At least as large as the highest address + size
+#define HOME_LAT_ADDR 0              // double, 8 bytes
+#define HOME_LON_ADDR 8              // double, 8 bytes
+#define FUEL_LITRES_ADDR 16          // float, 4 bytes
+#define FUEL_BURNRATE_ADDR 20        // float, 4 bytes
+#define FUEL_VISIBLE_ADDR 24         // uint8_t, 1 byte
 
 // Change detection thresholds
 #define SPEED_CHANGE_THRESHOLD 1.0     // km/h
@@ -227,15 +228,19 @@ void setup() {
   }
 
   // Load fuelLitres from EEPROM
-  EEPROM.get(FUEL_LITRES_ADDR, fuelLitres); // EEPROM -> RAM
-  if (fuelLitres < FUEL_MIN || fuelLitres > FUEL_MAX) fuelLitres = FUEL_MAX; // Default if not set
-  
+  EEPROM.get(FUEL_LITRES_ADDR, fuelLitres);
+  if (fuelLitres < FUEL_MIN || fuelLitres > FUEL_MAX) fuelLitres = FUEL_MAX;
+
+  // Load fuelBurnRate from EEPROM
+  EEPROM.get(FUEL_BURNRATE_ADDR, fuelBurnRate);
+  if (fuelBurnRate < 3.0 || fuelBurnRate > 5.5) fuelBurnRate = 4.8;
+
   // Load fuel display visibility from EEPROM as uint8_t
   uint8_t tempVisible = 1; // default to visible
   EEPROM.get(FUEL_VISIBLE_ADDR, tempVisible);
   fuelDisplayVisible = (tempVisible != 0);
-  Serial.printf("Loaded fuelDisplayVisible from EEPROM: %s\n", fuelDisplayVisible ? "true" : "false"); // DEBUG
-  
+  Serial.printf("Loaded fuelDisplayVisible from EEPROM: %s\n", fuelDisplayVisible ? "true" : "false");
+
   // Initial full screen draw
   display.fillScreen(GxEPD_WHITE);
   drawBackground();
@@ -1154,7 +1159,7 @@ void enterSettingsScreen() {
                 Serial.println("Settings Timeout: Saving and restarting..."); // DEBUG
                 // Save all settings including visibility as uint8_t
                 EEPROM.put(FUEL_LITRES_ADDR, fuelLitres);
-                EEPROM.put(FUEL_LITRES_ADDR + 4, fuelBurnRate);
+                EEPROM.put(FUEL_BURNRATE_ADDR, fuelBurnRate);
                 uint8_t visibleByte = fuelDisplayVisible ? 1 : 0;
                 EEPROM.put(FUEL_VISIBLE_ADDR, visibleByte);
                 EEPROM.commit();
