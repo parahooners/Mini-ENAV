@@ -13,7 +13,7 @@
 #include "tahoma20pt7b.h" // Include the new font file
 #include "tahoma15pt7b.h" // Include the 15pt font file
 #include "tahoma10pt7b.h" // Include the 10pt font file
-
+#include <math.h> // Add this include for isnan()
 
 // Correct pin definitions for LilyGO E-Paper Watch
 #define GPS_RX 21
@@ -157,6 +157,7 @@ void drawBatteryIcon(int x, int y, int width, int height, int percentage);
 void drawSatelliteIcon(int x, int y, int size);
 void drawJerryCan(int x, int y, int width, int height);
 void enterSettingsScreen();
+void drawCompassRose(int cx, int cy, int radius, float headingDegrees);
 
 void setup() {
   Serial.begin(115200);
@@ -229,11 +230,11 @@ void setup() {
 
   // Load fuelLitres from EEPROM
   EEPROM.get(FUEL_LITRES_ADDR, fuelLitres);
-  if (fuelLitres < FUEL_MIN || fuelLitres > FUEL_MAX) fuelLitres = FUEL_MAX;
+  if (isnan(fuelLitres) || fuelLitres < FUEL_MIN || fuelLitres > FUEL_MAX) fuelLitres = FUEL_MAX;
 
   // Load fuelBurnRate from EEPROM
   EEPROM.get(FUEL_BURNRATE_ADDR, fuelBurnRate);
-  if (fuelBurnRate < 3.0 || fuelBurnRate > 5.5) fuelBurnRate = 4.8;
+  if (isnan(fuelBurnRate) || fuelBurnRate < 3.0 || fuelBurnRate > 5.5) fuelBurnRate = 4.8;
 
   // Load fuel display visibility from EEPROM as uint8_t
   uint8_t tempVisible = 1; // default to visible
@@ -630,7 +631,7 @@ void drawBackground() {
   display.setTextColor(GxEPD_BLACK); // Ensure color is set
 
   // Draw battery icon (Top Left)
-  drawBatteryIcon(0, 0, 40, 20, getBatteryPercent()); // Corrected size
+  drawBatteryIcon(0, 0, 40, 20, getBatteryPercent());
 
   // Draw satellite icon (Top Right)
   drawSatelliteIcon(175, 0, 25);
@@ -639,6 +640,15 @@ void drawBackground() {
   if (fuelDisplayVisible) {
     drawJerryCan(0, 160, 45, 38);
   }
+
+  // --- Draw compass rose in bottom right, single-pixel ring, diameter -2px ---
+  int compassRadius = 24; // Reduce radius by 1px (diameter -2px)
+  int compassMargin = 3;
+  int compassCx = SCREEN_WIDTH - compassRadius - compassMargin + 3;
+  int compassCy = SCREEN_HEIGHT - compassRadius - compassMargin + 3;
+  float heading = currentCourse;
+  drawCompassRose(compassCx, compassCy, compassRadius, heading);
+  // --- End compass rose ---
 }
 
 void drawRingWithGaps(int radius) {
@@ -1036,6 +1046,7 @@ void enterSettingsScreen() {
     unsigned long lastInteractionTime = millis();
     bool processed = true;
     int settingStage = 0; // 0=Litres, 1=Burn Rate, 2=Visibility
+    int settingsLoopCounter = 0; // Add a counter for loop iterations
 
     // Initial screen draw
     display.setFont(&tahoma15pt7b);
@@ -1061,6 +1072,9 @@ void enterSettingsScreen() {
     display.updateWindow(0, 0, 200, 200);
     
     while (true) {
+        settingsLoopCounter++; // Increment the counter
+        Serial.printf("Settings loop count: %d\n", settingsLoopCounter); // Print to serial
+
         if (!digitalRead(PIN_KEY)) {
             if (processed) {
                 processed = false;
@@ -1118,7 +1132,7 @@ void enterSettingsScreen() {
                     case 2: display.drawRect(110, 130, 70, 30, GxEPD_BLACK); break;
                 }
                 
-                display.updateWindow(0, 0, 200, 200);
+                display.updateWindow(110, 30 + settingStage * 50, 70, 30); // only the selection box area
             }
         } else {
             processed = true;
@@ -1154,7 +1168,7 @@ void enterSettingsScreen() {
                     case 1: display.drawRect(110, 80, 70, 30, GxEPD_BLACK); break;
                     case 2: display.drawRect(110, 130, 70, 30, GxEPD_BLACK); break;
                 }
-                display.updateWindow(0, 0, 200, 200);
+                display.updateWindow(110, 30 + settingStage * 50, 70, 30); // only the selection box area
             } else {
                 Serial.println("Settings Timeout: Saving and restarting..."); // DEBUG
                 // Save all settings including visibility as uint8_t
@@ -1166,5 +1180,37 @@ void enterSettingsScreen() {
                 ESP.restart();
             }
         }
+    }
+}
+
+void drawCompassRose(int cx, int cy, int radius, float headingDegrees) {
+    // Draw outer circle (single pixel)
+    display.drawCircle(cx, cy, radius, GxEPD_BLACK);
+
+    // Draw main compass lines (N, E, S, W)
+    for (int i = 0; i < 4; ++i) {
+        float angle = (i * 90 - headingDegrees) * PI / 180.0;
+        int x1 = cx + (int)(cos(angle) * (radius - 2));
+        int y1 = cy + (int)(sin(angle) * (radius - 2));
+        int x2 = cx + (int)(cos(angle) * (radius / 2));
+        int y2 = cy + (int)(sin(angle) * (radius / 2));
+        display.drawLine(x1, y1, x2, y2, GxEPD_BLACK);
+    }
+
+    // Draw cardinal letters
+    display.setFont(&FreeMonoBold9pt7b);
+    display.setTextColor(GxEPD_BLACK);
+
+    struct { const char* label; float angle; } points[] = {
+        {"N", 270}, {"E", 0}, {"S", 90}, {"W", 180}
+    };
+    for (int i = 0; i < 4; ++i) {
+        float angle = (points[i].angle - headingDegrees) * PI / 180.0;
+        int tx = cx + (int)(cos(angle) * (radius - 10));
+        int ty = cy + (int)(sin(angle) * (radius - 10));
+        int16_t tbx, tby; uint16_t tbw, tbh;
+        display.getTextBounds(points[i].label, 0, 0, &tbx, &tby, &tbw, &tbh);
+        display.setCursor(tx - tbw / 2, ty + tbh / 2);
+        display.print(points[i].label);
     }
 }
