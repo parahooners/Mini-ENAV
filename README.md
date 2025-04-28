@@ -1,6 +1,6 @@
 # 🧭 Mini ENAV - Your Pocket Crow-Flies Navigator! 🧭
 
-![image](https://github.com/Matt-Builder/Mini-ENAV/assets/101741817/9301517d-9378-428d-864c-731024342442)
+
 ![Mini ENAV Display](https://github.com/parahooners/Mini-ENAV/blob/main/include/Photos/image0.png?raw=true)
 ![Mini ENAV Watch](https://github.com/parahooners/Mini-ENAV/blob/main/include/Photos/image1.jpeg?raw=true)
 
@@ -16,12 +16,28 @@ This project turns a nifty little LilyGO E-Paper Watch into a minimalist navigat
 
 ## Features
 
-- E-paper display (1.54" 200x200)
-- GPS navigation (TinyGPS++)
-- Return-to-home and takeoff point tracking
-- Battery and satellite status
-- Haptic feedback (vibration motor)
-- 3D-printable case
+- **Navigation Indicators**:
+  - Displays distance and heading to a home point or takeoff point.
+  - Updates dynamically based on GPS data.
+- **Fuel Tracking**:
+  - Tracks remaining fuel in liters.
+  - Displays estimated flight time based on fuel burn rate.
+- **Flight Hours Tracking**:
+  - Accumulates total flight hours and stores them persistently in EEPROM.
+  - Displays total flight hours on the "Wait GPS" screen.
+- **Settings Screen**:
+  - Allows adjustment of:
+    - **Fuel quantity**: Set the current fuel level in liters.
+    - **Fuel burn rate**: Adjust the fuel consumption rate in liters per hour.
+    - **Fuel display visibility**: Toggle the visibility of the fuel display.
+  - Displays **estimated flight time** based on the current fuel and burn rate.
+- **Energy Efficiency**:
+  - CPU frequency reduced to **40 MHz** to maximize power efficiency.
+  - E-paper display refresh rate optimized to 0.8 seconds.
+  - Wi-Fi and Bluetooth disabled to conserve energy.
+  - Deep sleep mode implemented for inactivity.
+- **Haptic Feedback**:
+  - Vibration motor for tactile feedback during key actions.
 
 ---
 
@@ -107,11 +123,41 @@ To change a value, press the button while the selection box is on the desired se
 
 ---
 
+## Recent Updates
+
+### 1. **Settings Screen Enhancements**
+- Labels are now aligned to the far left for improved readability.
+- Added the ability to adjust:
+  - **Fuel quantity**: Set the current fuel level in liters.
+  - **Fuel burn rate**: Adjust the fuel consumption rate in liters per hour.
+  - **Fuel display visibility**: Toggle the visibility of the fuel display.
+- Displays **estimated flight time** based on the current fuel and burn rate.
+
+### 2. **Flight Hours Tracking**
+- Total flight hours are now displayed on the "Wait GPS" screen.
+- Flight hours are stored persistently in EEPROM and updated periodically during flight.
+
+### 3. **Energy Efficiency Improvements**
+- CPU frequency reduced to **40 MHz** to conserve power.
+- E-paper display refresh rate optimized to match its 0.8-second refresh limitation.
+- All unnecessary `Serial.print` debugging statements have been removed to save power.
+- Wi-Fi and Bluetooth are disabled throughout the program.
+
+---
+
 ## Notes
 
 - Ensure GPS has a clear view of the sky for best accuracy.
 - Battery voltage calibration may be needed for your hardware.
 - For 3D case printing, adjust STL scaling as needed for your printer and hardware tolerances.
+
+---
+
+## About the Author
+
+This project was written by **Matty Austen**, a lifelong coder who started programming at a very young age. Matty is passionate about making technology accessible to everyone, not just a select few. His love for paramotoring inspired this project, and he hopes it will be useful to the paramotoring community and beyond.
+
+Matty is also the creator of the **Parahooners YouTube channel**, where he shares his adventures in paramotoring. Be sure to check it out for exciting content and insights into the world of paramotoring!
 
 ---
 
@@ -122,8 +168,6 @@ If you find Mini ENAV useful and want to show your appreciation, you can buy me 
 <a href="https://buymeacoffee.com/hooners" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
 ---
-
-
 
 ## License
 

@@ -14,6 +14,7 @@
 #include "tahoma15pt7b.h" // Include the 15pt font file
 #include "tahoma10pt7b.h" // Include the 10pt font file
 #include <math.h> // Add this include for isnan()
+#include <WiFi.h> // Include the WiFi library
 
 // Correct pin definitions for LilyGO E-Paper Watch
 #define GPS_RX 21
@@ -44,17 +45,18 @@
 #define MAX_DISTANCE  30   // km - when icon reaches outer position
 
 // Time constants - Optimized for faster updates
-#define UPDATE_INTERVAL 500    // Update every 0.5 seconds (500 ms)
+#define UPDATE_INTERVAL 800    // Update every 0.8 seconds (800 ms)
 #define SLEEP_TIMEOUT 600000   // 10 minutes in ms
 #define GPS_TIMEOUT 5000       // 5 seconds timeout for GPS data
 
 // EEPROM addresses (no overlap!)
-#define EEPROM_SIZE 25 // At least as large as the highest address + size
+#define EEPROM_SIZE 29 // Increased for flight hours storage
 #define HOME_LAT_ADDR 0              // double, 8 bytes
 #define HOME_LON_ADDR 8              // double, 8 bytes
 #define FUEL_LITRES_ADDR 16          // float, 4 bytes
 #define FUEL_BURNRATE_ADDR 20        // float, 4 bytes
 #define FUEL_VISIBLE_ADDR 24         // uint8_t, 1 byte
+#define FLIGHT_HOURS_ADDR 25         // float, 4 bytes (NEW)
 
 // Change detection thresholds
 #define SPEED_CHANGE_THRESHOLD 1.0     // km/h
@@ -108,6 +110,11 @@ unsigned long lastFuelUpdate = 0;
 const float FUEL_MIN = 5.0;
 const float FUEL_MAX = 20.0;
 
+// Flight hours tracking
+float totalFlightHours = 0.0f; // Total hours flown (persisted)
+unsigned long lastFlightUpdate = 0; // For accumulating time
+bool wasFlying = false;
+
 // Previous values for change detection
 double prevSpeed = -1.0;
 double prevAlt = -1.0;
@@ -160,19 +167,22 @@ void enterSettingsScreen();
 void drawCompassRose(int cx, int cy, int radius, float headingDegrees);
 
 void setup() {
-  Serial.begin(115200);
-  
-  // Debug: Indicate setup start
-  Serial.println("Setup started...");
-  
-  // Overclock the ESP32 for better performance
-  setCustomCpuFrequencyMhz(240); // Default is 160MHz
+  // Reduce the CPU frequency to 40 MHz for lower power consumption
+  setCustomCpuFrequencyMhz(40); // Reduced from 80 MHz to 40 MHz
   
   // Initialize SPI for the display with the correct pins
   SPI.begin(SPI_SCK, -1, SPI_DIN, EPD_CS);
   
   // Initialize GPS with correct pins
   GPSSerial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
+
+  // Turn off the backlight to save power
+  pinMode(Backlight, OUTPUT);
+  digitalWrite(Backlight, LOW);
+  
+  // Disable Wi-Fi and BLE to save power
+  WiFi.mode(WIFI_OFF);
+  btStop();
   
   // Set GPS to higher update rate (if supported)
   delay(100);
@@ -187,7 +197,6 @@ void setup() {
       EEPROM.write(i, 0);
   }
   EEPROM.commit();
-  Serial.println("EEPROM cleared!");
   */
 
   // Initialize display with optimized settings
@@ -200,9 +209,6 @@ void setup() {
   display.fillRect(0, 0, 200, 200, GxEPD_WHITE); // Draw a 200x200 white box
   display.updateWindow(0, 0, 200, 200); // Partial update for the entire screen
   
-  // Debug: Indicate display initialization
-  Serial.println("Display initialized...");
-  
   // Enable power to peripherals
   pinMode(PWR_EN, OUTPUT);
   digitalWrite(PWR_EN, HIGH);
@@ -213,11 +219,9 @@ void setup() {
   digitalWrite(PIN_MOTOR, LOW); // Motor is explicitly set to LOW here
   
   // --- Add startup vibration ---
-  Serial.println("Vibrating motor on startup...");
   digitalWrite(PIN_MOTOR, HIGH);
   delay(150); // Vibrate for 150ms
   digitalWrite(PIN_MOTOR, LOW);
-  Serial.println("Startup vibration complete.");
   // --- End startup vibration ---
 
   // Load home position from EEPROM
@@ -240,15 +244,15 @@ void setup() {
   uint8_t tempVisible = 1; // default to visible
   EEPROM.get(FUEL_VISIBLE_ADDR, tempVisible);
   fuelDisplayVisible = (tempVisible != 0);
-  Serial.printf("Loaded fuelDisplayVisible from EEPROM: %s\n", fuelDisplayVisible ? "true" : "false");
+
+  // Load total flight hours from EEPROM
+  EEPROM.get(FLIGHT_HOURS_ADDR, totalFlightHours);
+  if (isnan(totalFlightHours) || totalFlightHours < 0) totalFlightHours = 0.0f;
 
   // Initial full screen draw
   display.fillScreen(GxEPD_WHITE);
   drawBackground();
   display.updateWindow(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT); // Full update only once
-
-  // Debug: Indicate setup completion
-  Serial.println("Setup completed...");
   
   // Draw initial center display
   updateCenterDisplay(); // Ensure the center circle is drawn initially
@@ -261,9 +265,6 @@ void setup() {
 }
 
 void loop() {
-  // Debug: Indicate loop start
-  Serial.println("Loop started...");
-
   if (millis() - startTime <= 10000) {
       bool buttonDown = (digitalRead(PIN_KEY) == LOW);
 
@@ -280,16 +281,6 @@ void loop() {
     char c = GPSSerial.read();
     if (gps.encode(c)) { // Process new GPS sentence
         updateGPSData();
-    }
-
-    // Update GPS time if available
-    if (gps.time.isUpdated() && gps.time.isValid()) {
-      Serial.print("GPS Time: ");
-      Serial.print(gps.time.hour());
-      Serial.print(":");
-      Serial.print(gps.time.minute());
-      Serial.print(":");
-      Serial.println(gps.time.second());
     }
   }
 
@@ -310,7 +301,6 @@ void loop() {
           while (digitalRead(PIN_KEY) == LOW) {
               // Check for long press (>= 5 seconds)
               if (!actionTaken && (millis() - buttonPressStartTime >= 5000)) {
-                  Serial.println("Long press detected (>= 5s). Preparing for sleep...");
                   prepareForSleep();
                   actionTaken = true;
                   break;
@@ -320,7 +310,6 @@ void loop() {
 
           // If no action was taken (i.e., it wasn't a long press), treat as short press
           if (!actionTaken) {
-              Serial.println("Short press action: Setting new home point.");
               setNewHomePoint();
           }
           delay(200);
@@ -341,10 +330,8 @@ void loop() {
       char altBuffer[10];
       if (gps.altitude.isValid()) {
           dtostrf(gps.altitude.meters() * 3.28084, 4, 0, altBuffer);
-          Serial.print("Altitude (ft): "); Serial.println(altBuffer);
       } else {
           strcpy(altBuffer, "---");
-          Serial.println("Altitude: ---");
       }
       int16_t alt_tbx, alt_tby; uint16_t alt_tbw, alt_tbh;
       display.getTextBounds(altBuffer, 0, 0, &alt_tbx, &alt_tby, &alt_tbw, &alt_tbh);
@@ -365,8 +352,9 @@ void loop() {
       display.updateWindow(0, 0, 200, 200); // Partial update for the entire screen
   }
 
-  // --- Fuel burn logic ---
   unsigned long now = millis();
+
+  // --- Fuel burn logic ---
   // Only burn fuel if speed > 5 mph (8.04672 km/h)
   if (currentSpeed > 8.04672) {
     if (lastFuelUpdate == 0) lastFuelUpdate = now;
@@ -380,10 +368,35 @@ void loop() {
     lastFuelUpdate = now; // Reset timer if not moving
   }
 
+  // --- Flight hours accumulation logic ---
+  bool flyingNow = (currentSpeed > 8.04672);
+  if (flyingNow) {
+    if (lastFlightUpdate == 0) lastFlightUpdate = now;
+    float flightHoursElapsed = (now - lastFlightUpdate) / 3600000.0f;
+    if (flightHoursElapsed > 0) {
+      totalFlightHours += flightHoursElapsed;
+      lastFlightUpdate = now;
+      // Save to EEPROM every 1 minute of flight
+      static float flightHoursLastSaved = 0.0f;
+      if (totalFlightHours - flightHoursLastSaved >= 1.0f / 60.0f) {
+        EEPROM.put(FLIGHT_HOURS_ADDR, totalFlightHours);
+        EEPROM.commit();
+        flightHoursLastSaved = totalFlightHours;
+      }
+    }
+  } else {
+    lastFlightUpdate = now; // Reset timer if not flying
+  }
+  // Save flight hours on transition from flying to not flying
+  if (wasFlying && !flyingNow) {
+    EEPROM.put(FLIGHT_HOURS_ADDR, totalFlightHours);
+    EEPROM.commit();
+  }
+  wasFlying = flyingNow;
+
   // Check for sleep timeout - This should run on every loop iteration
   // Ensure updateGPSData() has run to update isMoving and lastMovementTime
   if (!isMoving && millis() - lastMovementTime > SLEEP_TIMEOUT) {
-     Serial.println("Inactivity detected. Preparing for sleep...");
      prepareForSleep();
   }
 
@@ -399,7 +412,6 @@ void updateGPSData() {
   if (gps.location.isUpdated() && locationValid) {
     currentLat = gps.location.lat();
     currentLon = gps.location.lng();
-    Serial.print("Location Updated: Lat="); Serial.print(currentLat, 6); Serial.print(", Lon="); Serial.println(currentLon, 6);
     dataChanged = true;
 
     // --- Detect Takeoff Point ---
@@ -410,14 +422,10 @@ void updateGPSData() {
         takeoffLat = currentLat;
         takeoffLon = currentLon;
         takeoffSet = true;
-        Serial.print("Takeoff point detected: Lat="); Serial.print(takeoffLat, 6);
-        Serial.print(", Lon="); Serial.println(takeoffLon, 6);
       }
       initialFixProcessed = true;
     }
     // --- End Detect Takeoff Point ---
-  } else if (gps.location.isUpdated() && !locationValid) {
-      Serial.println("Location Updated but INVALID.");
   }
 
   if (gps.altitude.isUpdated() && gps.altitude.isValid()) {
@@ -425,7 +433,6 @@ void updateGPSData() {
     if (fabs(newAlt - currentAlt) > ALT_CHANGE_THRESHOLD) {
       currentAlt = newAlt;
       prevAlt = currentAlt;
-      Serial.print("Altitude Updated: "); Serial.println(currentAlt);
       dataChanged = true;
     }
   }
@@ -435,7 +442,6 @@ void updateGPSData() {
     if (fabs(newSpeed - currentSpeed) > SPEED_CHANGE_THRESHOLD) {
       currentSpeed = newSpeed;
       prevSpeed = currentSpeed;
-      Serial.print("Speed Updated: "); Serial.println(currentSpeed);
       dataChanged = true;
       if (currentSpeed > SPEED_CHANGE_THRESHOLD) {
           isMoving = true;
@@ -450,7 +456,6 @@ void updateGPSData() {
      double newCourseGPS = gps.course.deg();
      if (fabs(newCourseGPS - currentCourse) > HEADING_CHANGE_THRESHOLD) {
         currentCourse = newCourseGPS;
-        Serial.print("Course Updated: "); Serial.println(currentCourse);
         dataChanged = true;
      }
   }
@@ -460,13 +465,11 @@ void updateGPSData() {
     if (newSatellites != satellites) {
         satellites = newSatellites;
         prevSatellites = satellites;
-        Serial.print("Satellites Updated: "); Serial.println(satellites);
         dataChanged = true;
 
         if (satellites >= 4 && waitingForGPS) {
             waitingForGPS = false;
             waitingForTakeoff = true;
-            Serial.println("Transitioning from 'Wait GPS' state.");
         }
     }
   }
@@ -482,13 +485,11 @@ void updateGPSData() {
     if (fabs(newDistance - distanceToHome) > DISTANCE_CHANGE_THRESHOLD) {
       distanceToHome = newDistance;
       prevDistance = distanceToHome; // Update previous value only when a change occurs
-      Serial.print(">>> Distance to Home Updated: "); Serial.println(distanceToHome, 4); // More precision
       dataChanged = true;
     }
 
     if (fabs(newCourseToHome - courseToHome) > HEADING_CHANGE_THRESHOLD) {
       courseToHome = newCourseToHome;
-      Serial.print(">>> Course to Home Updated: "); Serial.println(courseToHome);
       dataChanged = true;
     }
   }
@@ -503,12 +504,10 @@ void updateGPSData() {
 
     if (fabs(newDistanceToTakeoff - distanceToTakeoff) > DISTANCE_CHANGE_THRESHOLD) {
       distanceToTakeoff = newDistanceToTakeoff;
-      Serial.print(">>> Distance to Takeoff Updated: "); Serial.println(distanceToTakeoff, 4); // More precision
     }
 
     if (fabs(newCourseToTakeoff - courseToTakeoff) > HEADING_CHANGE_THRESHOLD) {
       courseToTakeoff = newCourseToTakeoff;
-      Serial.print(">>> Course to Takeoff Updated: "); Serial.println(courseToTakeoff);
     }
   }
 }
@@ -519,8 +518,6 @@ void updateCenterDisplay() {
   bool isMeters = false; // Flag to track if distance is in meters
 
   if (waitingForGPS) {
-    // This state should ideally be handled by drawRotatingDot now
-    Serial.println("Warning: updateCenterDisplay called while waitingForGPS is true.");
     centerText = "Wait GPS";
     display.setFont(&FreeMonoBold9pt7b);
   } else { // Not waiting for GPS (includes waitingForTakeoff or navigating)
@@ -530,12 +527,10 @@ void updateCenterDisplay() {
           int distMeters = (int)round(distanceToHome * 1000.0);
           sprintf(buffer, "%d", distMeters); // Format as integer meters
           isMeters = true;
-          Serial.print("Displaying distance in meters: "); Serial.println(distMeters);
       } else { // 500m or more
           // Format distance in KM with 1 decimal place, increased width to 5
           dtostrf(distanceToHome, 5, 1, buffer); // e.g., 1.2, 12.3, 123.4
           isMeters = false;
-          Serial.print("Displaying distance in KM: "); Serial.println(buffer);
       }
       centerText = String(buffer);
       // Use the Tahoma 20pt font for distance/meters
@@ -565,19 +560,15 @@ void updateCenterDisplay() {
           int16_t btbx, btby; uint16_t btw, bth;
           display.getTextBounds(beforeDecimal, 0, 0, &btbx, &btby, &btw, &bth);
           textX = CENTER_X - btw; // Align decimal point near center
-          Serial.print("Centering distance (KM) on decimal. Width before decimal: "); Serial.println(btw);
       } else {
           // Default centering for distance (meters) or other text
           textX = CENTER_X - tbw / 2;
-          Serial.print("Centering whole text block. Total width: "); Serial.println(tbw);
       }
 
       // --- Print Distance (or Meters) ---
       display.setCursor(textX, distY);
       display.setTextColor(GxEPD_BLACK);
       display.print(centerText);
-      Serial.print("Distance/Meters text set to: "); Serial.println(centerText);
-      Serial.print("Calculated position: X="); Serial.print(textX); Serial.print(", Y="); Serial.println(distY);
 
       // --- Add Speed Below Distance ---
       if (useDistanceFont) { // Only show speed if distance is shown (i.e., homeSet is true)
@@ -599,20 +590,15 @@ void updateCenterDisplay() {
 
           display.setCursor(speedX, speedY);
           display.print(speedText);
-          Serial.print("Speed text set to: "); Serial.println(speedText);
-          Serial.print("Calculated position: X="); Serial.print(speedX); Serial.print(", Y="); Serial.println(speedY);
       }
 
   } else {
-      Serial.println("No center text to display.");
       // Optionally clear the center if needed
       // display.fillCircle(CENTER_X, CENTER_Y, INNER_RADIUS - 1, GxEPD_WHITE);
   }
 }
 
 void drawBackground() {
-  Serial.println("Drawing background...");
-
   for (int i = 0; i < 3; i++) {
     display.drawCircle(CENTER_X, CENTER_Y, OUTER_RADIUS - i, GxEPD_BLACK);
   }
@@ -767,12 +753,6 @@ void setNewHomePoint() {
     EEPROM.put(HOME_LON_ADDR, homeLon);
     EEPROM.commit();
 
-    Serial.print("New home point saved: ");
-    Serial.print("Lat: ");
-    Serial.print(homeLat, 6);
-    Serial.print(", Lon: ");
-    Serial.println(homeLon, 6);
-
     display.updateWindow(CENTER_X - INNER_RADIUS, CENTER_Y - INNER_RADIUS, 
                          2 * INNER_RADIUS, 2 * INNER_RADIUS, true);
     display.fillCircle(CENTER_X, CENTER_Y, INNER_RADIUS - 1, GxEPD_WHITE);
@@ -797,8 +777,6 @@ void setNewHomePoint() {
 
     distanceToHome = 0;
     updateCenterDisplay();
-  } else {
-    Serial.println("GPS location is invalid. Cannot set new home point.");
   }
 }
 
@@ -843,6 +821,10 @@ void prepareForSleep() {
   // Explicitly power down the display controller to retain the image
   display.powerDown(); // Add this line
 
+  // Save total flight hours before sleep
+  EEPROM.put(FLIGHT_HOURS_ADDR, totalFlightHours);
+  EEPROM.commit();
+
   // Power down peripherals
   digitalWrite(PWR_EN, LOW);
   digitalWrite(Backlight, LOW); // Assuming Backlight pin is defined and used
@@ -881,17 +863,30 @@ void drawRotatingDot() {
   display.fillScreen(GxEPD_WHITE); // Full clear for this animation state
   drawBackground(); // Redraw static background elements (rings, labels)
 
-  // Draw "Wait GPS" text in the center
+  // --- Total Flight Hours Above "Wait GPS" ---
+  display.setFont(&FreeMonoBold9pt7b);
+  display.setTextColor(GxEPD_BLACK);
+  char hoursBuffer[16];
+  snprintf(hoursBuffer, sizeof(hoursBuffer), "HR %.1f", totalFlightHours);
+  int16_t htbx, htby; uint16_t htbw, htbh;
+  display.getTextBounds(hoursBuffer, 0, 0, &htbx, &htby, &htbw, &htbh);
+  // Move down 10px from previous position
+  int hoursY = CENTER_Y - htbh - 10; // 10px above Wait GPS (will move Wait GPS down too)
+  display.setCursor(CENTER_X - htbw / 2, hoursY);
+  display.print(hoursBuffer);
+  // --- End Total Flight Hours Display ---
+
+  // Draw "Wait GPS" text in the center, moved down 10px
   display.setFont(&FreeMonoBold9pt7b); // Set font for "Wait GPS"
   display.setTextColor(GxEPD_BLACK);
   String centerText = "Wait GPS";
   int16_t tbx, tby; uint16_t tbw, tbh;
   display.getTextBounds(centerText, 0, 0, &tbx, &tby, &tbw, &tbh);
-  int waitGpsY = CENTER_Y + tbh / 2 - 5; // Slightly shift up Wait GPS text
+  int waitGpsY = CENTER_Y + tbh / 2 + 5; // Original -5, now +5 (moved down 10px)
   display.setCursor(CENTER_X - tbw / 2, waitGpsY);
   display.print(centerText);
 
-  // --- Battery Voltage Below "Wait GPS" (same font and color) ---
+  // --- Battery Voltage Below "Wait GPS" (same font and color), moved down 10px ---
   int adcValue = analogRead(Bat_ADC);
   float voltage = (adcValue / ADC_RESOLUTION) * ADC_REFERENCE * BAT_VOLTAGE_DIVIDER;
   char voltageBuffer[8];
@@ -899,7 +894,7 @@ void drawRotatingDot() {
   strcat(voltageBuffer, "V");
   int16_t vtbx, vtby; uint16_t vtbw, vtbh;
   display.getTextBounds(voltageBuffer, 0, 0, &vtbx, &vtby, &vtbw, &vtbh);
-  int voltageY = waitGpsY + tbh + 8; // 8px below Wait GPS text
+  int voltageY = waitGpsY + tbh + 18; // 8px + 10px = 18px below Wait GPS text
   display.setCursor(CENTER_X - vtbw / 2, voltageY);
   display.print(voltageBuffer);
   // --- End Battery Voltage Display ---
@@ -1051,53 +1046,78 @@ void enterSettingsScreen() {
     // Initial screen draw
     display.setFont(&tahoma15pt7b);
     display.fillScreen(GxEPD_WHITE);
-    
-    // Draw all three options
-    display.setCursor(20, 50);
+
+    // Adjusted positions for far-left alignment
+    int labelX = 5;  // X position for labels (moved to the far left)
+    int valueX = 120; // X position for values
+    int row1Y = 50;  // Y position for row 1
+    int row2Y = 100; // Y position for row 2
+    int row3Y = 150; // Y position for row 3
+
+    // Draw all three options (labels and values)
+    display.setCursor(labelX, row1Y);
     display.print("Litres:");
-    display.setCursor(120, 50);
+    display.setCursor(valueX, row1Y);
     display.print(fuelLitres, 1);
-    
-    display.setCursor(20, 100);
+
+    display.setCursor(labelX, row2Y);
     display.print("Burn:");
-    display.setCursor(120, 100);
+    display.setCursor(valueX, row2Y);
     display.print(fuelBurnRate, 1);
-    
-    display.setCursor(20, 150);
+
+    display.setCursor(labelX, row3Y);
     display.print("Show:");
-    display.setCursor(120, 150);
+    display.setCursor(valueX, row3Y);
     display.print(fuelDisplayVisible ? "Yes" : "No");
-    
-    display.drawRect(110, 30, 70, 30, GxEPD_BLACK); // Initial selection box
+
+    // Draw selection box only around the value that can be changed
+    int16_t val_x, val_y;
+    uint16_t val_w, val_h;
+    switch (settingStage) {
+        case 0: // Litres
+            display.getTextBounds(String(fuelLitres, 1), valueX, row1Y, &val_x, &val_y, &val_w, &val_h);
+            display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+            break;
+        case 1: // Burn Rate
+            display.getTextBounds(String(fuelBurnRate, 1), valueX, row2Y, &val_x, &val_y, &val_w, &val_h);
+            display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+            break;
+        case 2: // Show
+            display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, row3Y, &val_x, &val_y, &val_w, &val_h);
+            display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+            break;
+    }
+
+    // --- Display Estimated Flight Time ---
+    float estimatedFlightTime = (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0;
+    char flightTimeBuffer[20];
+    snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", estimatedFlightTime);
+    display.setCursor(labelX, 190); // Bottom of the screen
+    display.print(flightTimeBuffer);
+    // --- End Estimated Flight Time Display ---
+
     display.updateWindow(0, 0, 200, 200);
-    
+
     while (true) {
-        settingsLoopCounter++; // Increment the counter
-        Serial.printf("Settings loop count: %d\n", settingsLoopCounter); // Print to serial
+        settingsLoopCounter++;
 
         if (!digitalRead(PIN_KEY)) {
             if (processed) {
                 processed = false;
                 lastInteractionTime = millis();
 
-                Serial.printf("Settings Button Press: Stage %d\n", settingStage); // DEBUG
-
                 // Handle different settings based on stage
                 switch(settingStage) {
                     case 0: // Litres
                         fuelLitres += 0.5;
                         if (fuelLitres > FUEL_MAX) fuelLitres = FUEL_MIN;
-                        Serial.printf("  New Litres: %.1f\n", fuelLitres); // DEBUG
                         break;
                     case 1: // Burn Rate
                         fuelBurnRate += 0.1;
                         if (fuelBurnRate > 5.5) fuelBurnRate = 3.0;
-                        Serial.printf("  New Burn Rate: %.1f\n", fuelBurnRate); // DEBUG
                         break;
                     case 2: // Visibility
-                        Serial.printf("  Before toggle: fuelDisplayVisible = %s\n", fuelDisplayVisible ? "true" : "false"); // DEBUG
                         fuelDisplayVisible = !fuelDisplayVisible; // Toggle visibility
-                        Serial.printf("  After toggle: fuelDisplayVisible = %s\n", fuelDisplayVisible ? "true" : "false"); // DEBUG
                         break;
                 }
 
@@ -1108,31 +1128,46 @@ void enterSettingsScreen() {
 
                 // Update display immediately after change
                 display.fillScreen(GxEPD_WHITE);
-                display.setCursor(20, 50);
+                display.setCursor(labelX, row1Y);
                 display.print("Litres:");
-                display.setCursor(120, 50);
+                display.setCursor(valueX, row1Y);
                 display.print(fuelLitres, 1);
                 
-                display.setCursor(20, 100);
+                display.setCursor(labelX, row2Y);
                 display.print("Burn:");
-                display.setCursor(120, 100);
+                display.setCursor(valueX, row2Y);
                 display.print(fuelBurnRate, 1);
                 
-                display.setCursor(20, 150);
+                display.setCursor(labelX, row3Y);
                 display.print("Show:");
-                display.setCursor(120, 150);
-                const char* showText = fuelDisplayVisible ? "Yes" : "No"; // Get text for debug
-                Serial.printf("  Printing Show: %s\n", showText); // DEBUG
-                display.print(showText); // Make sure this updates
-                
-                // Draw selection box based on current stage
-                switch(settingStage) {
-                    case 0: display.drawRect(110, 30, 70, 30, GxEPD_BLACK); break;
-                    case 1: display.drawRect(110, 80, 70, 30, GxEPD_BLACK); break;
-                    case 2: display.drawRect(110, 130, 70, 30, GxEPD_BLACK); break;
+                display.setCursor(valueX, row3Y);
+                const char* showText = fuelDisplayVisible ? "Yes" : "No";
+                display.print(showText);
+
+                // Draw selection box only around the value that can be changed
+                switch (settingStage) {
+                    case 0:
+                        display.getTextBounds(String(fuelLitres, 1), valueX, row1Y, &val_x, &val_y, &val_w, &val_h);
+                        display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+                        break;
+                    case 1:
+                        display.getTextBounds(String(fuelBurnRate, 1), valueX, row2Y, &val_x, &val_y, &val_w, &val_h);
+                        display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+                        break;
+                    case 2:
+                        display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, row3Y, &val_x, &val_y, &val_w, &val_h);
+                        display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+                        break;
                 }
-                
-                display.updateWindow(110, 30 + settingStage * 50, 70, 30); // only the selection box area
+
+                // --- Update Estimated Flight Time ---
+                estimatedFlightTime = (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0;
+                snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", estimatedFlightTime);
+                display.setCursor(labelX, 190); // Bottom of the screen
+                display.print(flightTimeBuffer);
+                // --- End Update Estimated Flight Time ---
+
+                display.updateWindow(0, 0, 200, 200);
             }
         } else {
             processed = true;
@@ -1143,35 +1178,46 @@ void enterSettingsScreen() {
             if (settingStage < 2) {
                 settingStage++;
                 lastInteractionTime = millis();
-                Serial.printf("Settings Timeout: Moving to Stage %d\n", settingStage); // DEBUG
-                
+
                 // Redraw with new selection box
                 display.fillScreen(GxEPD_WHITE);
-                
-                display.setCursor(20, 50);
+
+                display.setCursor(labelX, row1Y);
                 display.print("Litres:");
-                display.setCursor(120, 50);
+                display.setCursor(valueX, row1Y);
                 display.print(fuelLitres, 1);
-                
-                display.setCursor(20, 100);
+
+                display.setCursor(labelX, row2Y);
                 display.print("Burn:");
-                display.setCursor(120, 100);
+                display.setCursor(valueX, row2Y);
                 display.print(fuelBurnRate, 1);
-                
-                display.setCursor(20, 150);
+
+                display.setCursor(labelX, row3Y);
                 display.print("Show:");
-                display.setCursor(120, 150);
+                display.setCursor(valueX, row3Y);
                 display.print(fuelDisplayVisible ? "Yes" : "No");
-                
-                // Draw correct selection box
-                switch(settingStage) {
-                    case 1: display.drawRect(110, 80, 70, 30, GxEPD_BLACK); break;
-                    case 2: display.drawRect(110, 130, 70, 30, GxEPD_BLACK); break;
+
+                // Draw selection box only around the value that can be changed
+                switch (settingStage) {
+                    case 1:
+                        display.getTextBounds(String(fuelBurnRate, 1), valueX, row2Y, &val_x, &val_y, &val_w, &val_h);
+                        display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+                        break;
+                    case 2:
+                        display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, row3Y, &val_x, &val_y, &val_w, &val_h);
+                        display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+                        break;
                 }
-                display.updateWindow(110, 30 + settingStage * 50, 70, 30); // only the selection box area
+
+                // --- Update Estimated Flight Time ---
+                estimatedFlightTime = (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0;
+                snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", estimatedFlightTime);
+                display.setCursor(labelX, 190); // Bottom of the screen
+                display.print(flightTimeBuffer);
+                // --- End Update Estimated Flight Time ---
+
+                display.updateWindow(0, 0, 200, 200);
             } else {
-                Serial.println("Settings Timeout: Saving and restarting..."); // DEBUG
-                // Save all settings including visibility as uint8_t
                 EEPROM.put(FUEL_LITRES_ADDR, fuelLitres);
                 EEPROM.put(FUEL_BURNRATE_ADDR, fuelBurnRate);
                 uint8_t visibleByte = fuelDisplayVisible ? 1 : 0;
