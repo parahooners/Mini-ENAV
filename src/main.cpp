@@ -48,6 +48,7 @@
 #define UPDATE_INTERVAL 800    // Update every 0.8 seconds (800 ms)
 #define SLEEP_TIMEOUT 600000   // 10 minutes in ms
 #define GPS_TIMEOUT 5000       // 5 seconds timeout for GPS data
+#define GPS_WAIT_TIMEOUT 600000 // 10 minutes in milliseconds
 
 // EEPROM addresses (no overlap!)
 #define EEPROM_SIZE 29 // Increased for flight hours storage
@@ -128,6 +129,7 @@ unsigned long lastUpdateTime = 0;
 unsigned long lastMovementTime = 0;
 unsigned long lastGPSTime = 0;
 unsigned long startTime = 0; // Track startup time
+unsigned long gpsWaitStartTime = 0; // Track the start time of GPS waiting
 bool isMoving = false;
 bool needsFullRedraw = true;
 bool inDeepSleep = false;
@@ -262,6 +264,9 @@ void setup() {
   lastMovementTime = millis();
   lastGPSTime = millis();
   startTime = millis(); // Record startup time
+
+  // Initialize GPS waiting timeout
+  gpsWaitStartTime = millis();
 }
 
 void loop() {
@@ -286,9 +291,30 @@ void loop() {
 
   // Handle display based on the current state
   if (waitingForGPS) {
+      // Check for long button press to manually enter sleep mode
+      if (digitalRead(PIN_KEY) == LOW) {
+          delay(50); // Debounce delay
+          if (digitalRead(PIN_KEY) == LOW) {
+              unsigned long buttonPressStartTime = millis();
+              while (digitalRead(PIN_KEY) == LOW) {
+                  if (millis() - buttonPressStartTime >= 5000) { // Long press (5 seconds)
+                      prepareForSleep();
+                      return;
+                  }
+                  delay(20);
+              }
+          }
+      }
+
+      if (millis() - gpsWaitStartTime > GPS_WAIT_TIMEOUT) {
+          prepareForSleep();
+      }
       drawRotatingDot();
       delay(60); // Faster refresh for better animation
       return;
+  } else {
+      // Reset GPS waiting start time when GPS is connected
+      gpsWaitStartTime = millis();
   }
 
   // --- Button Handling Logic (Navigation Page) ---
@@ -1047,27 +1073,36 @@ void enterSettingsScreen() {
     display.setFont(&tahoma15pt7b);
     display.fillScreen(GxEPD_WHITE);
 
-    // Adjusted positions for far-left alignment
-    int labelX = 5;  // X position for labels (moved to the far left)
-    int valueX = 120; // X position for values
-    int row1Y = 50;  // Y position for row 1
-    int row2Y = 100; // Y position for row 2
-    int row3Y = 150; // Y position for row 3
+    // --- Even vertical spacing for 3 rows + 1 info row ---
+    const int numRows = 4;
+    const int topMargin = 30;
+    const int bottomMargin = 20;
+    const int usableHeight = SCREEN_HEIGHT - topMargin - bottomMargin;
+    const int rowSpacing = usableHeight / (numRows - 1);
+
+    int labelX = 5;    // X position for labels (far left)
+    int valueX = 120;  // X position for values
+
+    int rowY[numRows];
+    for (int i = 0; i < numRows; ++i) {
+        rowY[i] = topMargin + i * rowSpacing;
+    }
+    // rowY[0]: Litres, rowY[1]: Burn, rowY[2]: Show, rowY[3]: Info
 
     // Draw all three options (labels and values)
-    display.setCursor(labelX, row1Y);
+    display.setCursor(labelX, rowY[0]);
     display.print("Litres:");
-    display.setCursor(valueX, row1Y);
+    display.setCursor(valueX, rowY[0]);
     display.print(fuelLitres, 1);
 
-    display.setCursor(labelX, row2Y);
+    display.setCursor(labelX, rowY[1]);
     display.print("Burn:");
-    display.setCursor(valueX, row2Y);
+    display.setCursor(valueX, rowY[1]);
     display.print(fuelBurnRate, 1);
 
-    display.setCursor(labelX, row3Y);
+    display.setCursor(labelX, rowY[2]);
     display.print("Show:");
-    display.setCursor(valueX, row3Y);
+    display.setCursor(valueX, rowY[2]);
     display.print(fuelDisplayVisible ? "Yes" : "No");
 
     // Draw selection box only around the value that can be changed
@@ -1075,15 +1110,15 @@ void enterSettingsScreen() {
     uint16_t val_w, val_h;
     switch (settingStage) {
         case 0: // Litres
-            display.getTextBounds(String(fuelLitres, 1), valueX, row1Y, &val_x, &val_y, &val_w, &val_h);
+            display.getTextBounds(String(fuelLitres, 1), valueX, rowY[0], &val_x, &val_y, &val_w, &val_h);
             display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
             break;
         case 1: // Burn Rate
-            display.getTextBounds(String(fuelBurnRate, 1), valueX, row2Y, &val_x, &val_y, &val_w, &val_h);
+            display.getTextBounds(String(fuelBurnRate, 1), valueX, rowY[1], &val_x, &val_y, &val_w, &val_h);
             display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
             break;
         case 2: // Show
-            display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, row3Y, &val_x, &val_y, &val_w, &val_h);
+            display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, rowY[2], &val_x, &val_y, &val_w, &val_h);
             display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
             break;
     }
@@ -1092,7 +1127,7 @@ void enterSettingsScreen() {
     float estimatedFlightTime = (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0;
     char flightTimeBuffer[20];
     snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", estimatedFlightTime);
-    display.setCursor(labelX, 190); // Bottom of the screen
+    display.setCursor(labelX, rowY[3]);
     display.print(flightTimeBuffer);
     // --- End Estimated Flight Time Display ---
 
@@ -1128,34 +1163,34 @@ void enterSettingsScreen() {
 
                 // Update display immediately after change
                 display.fillScreen(GxEPD_WHITE);
-                display.setCursor(labelX, row1Y);
+                display.setCursor(labelX, rowY[0]);
                 display.print("Litres:");
-                display.setCursor(valueX, row1Y);
+                display.setCursor(valueX, rowY[0]);
                 display.print(fuelLitres, 1);
-                
-                display.setCursor(labelX, row2Y);
+
+                display.setCursor(labelX, rowY[1]);
                 display.print("Burn:");
-                display.setCursor(valueX, row2Y);
+                display.setCursor(valueX, rowY[1]);
                 display.print(fuelBurnRate, 1);
-                
-                display.setCursor(labelX, row3Y);
+
+                display.setCursor(labelX, rowY[2]);
                 display.print("Show:");
-                display.setCursor(valueX, row3Y);
+                display.setCursor(valueX, rowY[2]);
                 const char* showText = fuelDisplayVisible ? "Yes" : "No";
                 display.print(showText);
 
                 // Draw selection box only around the value that can be changed
                 switch (settingStage) {
                     case 0:
-                        display.getTextBounds(String(fuelLitres, 1), valueX, row1Y, &val_x, &val_y, &val_w, &val_h);
+                        display.getTextBounds(String(fuelLitres, 1), valueX, rowY[0], &val_x, &val_y, &val_w, &val_h);
                         display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
                         break;
                     case 1:
-                        display.getTextBounds(String(fuelBurnRate, 1), valueX, row2Y, &val_x, &val_y, &val_w, &val_h);
+                        display.getTextBounds(String(fuelBurnRate, 1), valueX, rowY[1], &val_x, &val_y, &val_w, &val_h);
                         display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
                         break;
                     case 2:
-                        display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, row3Y, &val_x, &val_y, &val_w, &val_h);
+                        display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, rowY[2], &val_x, &val_y, &val_w, &val_h);
                         display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
                         break;
                 }
@@ -1163,7 +1198,7 @@ void enterSettingsScreen() {
                 // --- Update Estimated Flight Time ---
                 estimatedFlightTime = (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0;
                 snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", estimatedFlightTime);
-                display.setCursor(labelX, 190); // Bottom of the screen
+                display.setCursor(labelX, rowY[3]);
                 display.print(flightTimeBuffer);
                 // --- End Update Estimated Flight Time ---
 
@@ -1182,29 +1217,29 @@ void enterSettingsScreen() {
                 // Redraw with new selection box
                 display.fillScreen(GxEPD_WHITE);
 
-                display.setCursor(labelX, row1Y);
+                display.setCursor(labelX, rowY[0]);
                 display.print("Litres:");
-                display.setCursor(valueX, row1Y);
+                display.setCursor(valueX, rowY[0]);
                 display.print(fuelLitres, 1);
 
-                display.setCursor(labelX, row2Y);
+                display.setCursor(labelX, rowY[1]);
                 display.print("Burn:");
-                display.setCursor(valueX, row2Y);
+                display.setCursor(valueX, rowY[1]);
                 display.print(fuelBurnRate, 1);
 
-                display.setCursor(labelX, row3Y);
+                display.setCursor(labelX, rowY[2]);
                 display.print("Show:");
-                display.setCursor(valueX, row3Y);
+                display.setCursor(valueX, rowY[2]);
                 display.print(fuelDisplayVisible ? "Yes" : "No");
 
                 // Draw selection box only around the value that can be changed
                 switch (settingStage) {
                     case 1:
-                        display.getTextBounds(String(fuelBurnRate, 1), valueX, row2Y, &val_x, &val_y, &val_w, &val_h);
+                        display.getTextBounds(String(fuelBurnRate, 1), valueX, rowY[1], &val_x, &val_y, &val_w, &val_h);
                         display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
                         break;
                     case 2:
-                        display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, row3Y, &val_x, &val_y, &val_w, &val_h);
+                        display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, rowY[2], &val_x, &val_y, &val_w, &val_h);
                         display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
                         break;
                 }
@@ -1212,7 +1247,7 @@ void enterSettingsScreen() {
                 // --- Update Estimated Flight Time ---
                 estimatedFlightTime = (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0;
                 snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", estimatedFlightTime);
-                display.setCursor(labelX, 190); // Bottom of the screen
+                display.setCursor(labelX, rowY[3]);
                 display.print(flightTimeBuffer);
                 // --- End Update Estimated Flight Time ---
 
