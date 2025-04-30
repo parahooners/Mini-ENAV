@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini ENAV Controller</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f4;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        header {
+            background-color: #333;
+            color: white;
+            text-align: center;
+            padding: 1rem;
+            margin-bottom: 20px;
+        }
+        h1 {
+            margin: 0;
+        }
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .control-panel {
+            flex: 1;
+            min-width: 300px;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .map-container {
+            height: 500px;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        #map {
+            height: 100%;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        button.disconnect {
+            background-color: #f44336;
+        }
+        select, input {
+            padding: 8px;
+            margin: 5px 0;
+            display: block;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+            width: 100%;
+        }
+        .flex-row {
+            display: flex;
+            gap: 10px;
+        }
+        .flex-row > * {
+            flex: 1;
+        }
+        .location-item {
+            padding: 10px;
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            margin-bottom: 5px;
+            border-radius: 4px;
+        }
+        #locationList {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 5px;
+            border-radius: 4px;
+            background-color: #f0f0f0;
+            min-height: 20px;
+        }
+        #serialMonitor {
+            width: 100%;
+            height: 200px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            overflow-y: scroll;
+            font-family: monospace;
+            background-color: #2e2e2e;
+            color: #f0f0f0;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Mini ENAV Controller</h1>
+    </header>
+    <div class="container">
+        <div class="controls">
+            <div class="control-panel">
+                <h2>Connection</h2>
+                <button id="connectBtn">Connect to Mini ENAV</button>
+                <button id="disconnectBtn" class="disconnect" disabled>Disconnect</button>
+                <div id="connectionStatus" class="status">Not connected</div>
+                
+                <h2>Location Management</h2>
+                <div class="flex-row">
+                    <div>
+                        <label for="locationName">Location ID:</label>
+                        <select id="locationName">
+                            <option value="1">1</option>
+                            <option value="2">2</option>
+                            <option value="3">3</option>
+                            <option value="4">4</option>
+                            <option value="5">5</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="locationStatus">Status:</label>
+                        <select id="locationStatus">
+                            <option value="ON">ON</option>
+                            <option value="OFF">OFF</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="flex-row">
+                    <div>
+                        <label for="latitude">Latitude:</label>
+                        <input type="number" id="latitude" step="0.000001" placeholder="Click on map">
+                    </div>
+                    <div>
+                        <label for="longitude">Longitude:</label>
+                        <input type="number" id="longitude" step="0.000001" placeholder="Click on map">
+                    </div>
+                </div>
+                
+                <button id="sendLocationBtn" disabled>Send Location</button>
+                
+                <h2>Saved Locations</h2>
+                <div id="locationList"></div>
+            </div>
+            
+            <div class="control-panel">
+                <h2>Serial Monitor</h2>
+                <div id="serialMonitor"></div>
+                <button id="clearMonitorBtn">Clear Monitor</button>
+            </div>
+        </div>
+        
+        <div class="map-container">
+            <div id="map"></div>
+        </div>
+    </div>
+    
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // BLE UUIDs
+        const ENAV_SERVICE_UUID = "7a41c6c2-e9cd-4136-9cbd-8a791086a566";
+        const LOCATION_CHAR_UUID = "98dcc5a5-d9fb-4fcc-be63-bf8a2eb4bcb4";
+        const RESPONSE_CHAR_UUID = "5bc4de8a-ed52-41a7-9e53-f8e927a0ee55";
+        
+        // Global BLE variables
+        let bleDevice = null;
+        let bleServer = null;
+        let enaService = null;
+        let locationChar = null;
+        let responseChar = null;
+        
+        // UI Elements
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const locationNameSelect = document.getElementById('locationName');
+        const locationStatusSelect = document.getElementById('locationStatus');
+        const latitudeInput = document.getElementById('latitude');
+        const longitudeInput = document.getElementById('longitude');
+        const sendLocationBtn = document.getElementById('sendLocationBtn');
+        const locationList = document.getElementById('locationList');
+        const serialMonitor = document.getElementById('serialMonitor');
+        const clearMonitorBtn = document.getElementById('clearMonitorBtn');
+        
+        // Stored locations
+        const savedLocations = {};
+        
+        // Initialize map
+        const map = L.map('map').setView([51.505, -0.09], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+        
+        // Markers collection
+        const markers = {};
+        
+        // Add click event to map
+        map.on('click', function(e) {
+            latitudeInput.value = e.latlng.lat.toFixed(6);
+            longitudeInput.value = e.latlng.lng.toFixed(6);
+        });
+        
+        // BLE Connection
+        connectBtn.addEventListener('click', async () => {
+            try {
+                logToMonitor('Requesting Bluetooth device...');
+                bleDevice = await navigator.bluetooth.requestDevice({
+                    filters: [{ name: 'Mini ENAV' }],
+                    optionalServices: [ENAV_SERVICE_UUID]
+                });
+                
+                logToMonitor('Connecting to GATT server...');
+                bleServer = await bleDevice.gatt.connect();
+                
+                logToMonitor('Getting Mini ENAV service...');
+                enaService = await bleServer.getPrimaryService(ENAV_SERVICE_UUID);
+                
+                logToMonitor('Getting characteristics...');
+                locationChar = await enaService.getCharacteristic(LOCATION_CHAR_UUID);
+                responseChar = await enaService.getCharacteristic(RESPONSE_CHAR_UUID);
+                
+                // Setup notifications for response characteristic
+                await responseChar.startNotifications();
+                responseChar.addEventListener('characteristicvaluechanged', handleResponseNotification);
+                
+                // Update UI
+                connectionStatus.textContent = 'Connected to Mini ENAV';
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+                sendLocationBtn.disabled = false;
+                
+                // Setup disconnect listener
+                bleDevice.addEventListener('gattserverdisconnected', handleDisconnect);
+                
+                logToMonitor('Connected to Mini ENAV!');
+            } catch (error) {
+                logToMonitor(`Connection error: ${error}`);
+                connectionStatus.textContent = `Connection failed: ${error}`;
+            }
+        });
+        
+        // Disconnect from device
+        disconnectBtn.addEventListener('click', () => {
+            if (bleDevice && bleDevice.gatt.connected) {
+                bleDevice.gatt.disconnect();
+            } else {
+                resetConnectionUI();
+            }
+        });
+        
+        // Handle disconnection
+        function handleDisconnect() {
+            logToMonitor('Disconnected from Mini ENAV');
+            resetConnectionUI();
+        }
+        
+        // Reset UI on disconnect
+        function resetConnectionUI() {
+            connectionStatus.textContent = 'Not connected';
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+            sendLocationBtn.disabled = true;
+            bleDevice = null;
+            bleServer = null;
+            enaService = null;
+            locationChar = null;
+            responseChar = null;
+        }
+        
+        // Handle notifications from the response characteristic
+        function handleResponseNotification(event) {
+            const value = new TextDecoder().decode(event.target.value);
+            logToMonitor(`Response: ${value}`);
+        }
+        
+        // Send location to device
+        sendLocationBtn.addEventListener('click', async () => {
+            if (!locationChar) {
+                logToMonitor('Not connected to device!');
+                return;
+            }
+            
+            const name = locationNameSelect.value;
+            const status = locationStatusSelect.value;
+            const lat = parseFloat(latitudeInput.value).toFixed(6);
+            const lon = parseFloat(longitudeInput.value).toFixed(6);
+            
+            if (isNaN(lat) || isNaN(lon)) {
+                logToMonitor('Invalid coordinates!');
+                return;
+            }
+            
+            // Prepare the data string: Name-Lat-Lon-Status
+            const data = `${name}-${lat}-${lon}-${status}`;
+            logToMonitor(`Sending: ${data}`);
+            
+            try {
+                // Convert string to bytes and send
+                const encoder = new TextEncoder();
+                await locationChar.writeValue(encoder.encode(data));
+                
+                // Save the location
+                savedLocations[name] = {
+                    name,
+                    lat: parseFloat(lat),
+                    lon: parseFloat(lon),
+                    status
+                };
+                
+                // Update marker on the map
+                updateMapMarker(name, parseFloat(lat), parseFloat(lon), status);
+                
+                // Update saved locations list
+                updateLocationsList();
+                
+            } catch (error) {
+                logToMonitor(`Send error: ${error}`);
+            }
+        });
+        
+        // Update or create a marker on the map
+        function updateMapMarker(name, lat, lon, status) {
+            // Remove existing marker if it exists
+            if (markers[name]) {
+                map.removeLayer(markers[name]);
+            }
+            
+            // Don't add marker if status is OFF
+            if (status === 'OFF') {
+                delete markers[name];
+                return;
+            }
+            
+            // Create icon based on the location name
+            const markerIcon = L.divIcon({
+                html: `<div style="
+                    background-color: #2b3be4;
+                    color: white;
+                    border-radius: 50%;
+                    width: 24px;
+                    height: 24px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-weight: bold;
+                    border: 2px solid white;
+                    box-shadow: 0 0 5px rgba(0,0,0,0.5);
+                ">${name}</div>`,
+                className: '',
+                iconSize: [28, 28]
+            });
+            
+            // Create the marker
+            markers[name] = L.marker([lat, lon], { icon: markerIcon })
+                .addTo(map)
+                .bindPopup(`Location ${name}<br>Lat: ${lat}<br>Lon: ${lon}`);
+            
+            // Center map on the most recently added marker
+            map.setView([lat, lon], 13);
+        }
+        
+        // Update the list of saved locations
+        function updateLocationsList() {
+            locationList.innerHTML = '';
+            
+            for (const id in savedLocations) {
+                const location = savedLocations[id];
+                const locationElement = document.createElement('div');
+                locationElement.className = 'location-item';
+                locationElement.innerHTML = `
+                    <strong>${location.name}</strong> (${location.status})<br>
+                    Lat: ${location.lat}, Lon: ${location.lon}
+                    <button class="load-btn" data-id="${location.name}">Load</button>
+                `;
+                locationList.appendChild(locationElement);
+            }
+            
+            // Add event listeners to load buttons
+            document.querySelectorAll('.load-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const id = e.target.dataset.id;
+                    const location = savedLocations[id];
+                    
+                    locationNameSelect.value = location.name;
+                    locationStatusSelect.value = location.status;
+                    latitudeInput.value = location.lat;
+                    longitudeInput.value = location.lon;
+                });
+            });
+        }
+        
+        // Log messages to the serial monitor
+        function logToMonitor(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            serialMonitor.innerHTML += `[${timestamp}] ${message}<br>`;
+            serialMonitor.scrollTop = serialMonitor.scrollHeight;
+        }
+        
+        // Clear the serial monitor
+        clearMonitorBtn.addEventListener('click', () => {
+            serialMonitor.innerHTML = '';
+        });
+        
+        // Check if Web Bluetooth is available
+        if (!navigator.bluetooth) {
+            logToMonitor('Web Bluetooth API is not available in your browser!');
+            connectBtn.disabled = true;
+            connectionStatus.textContent = 'Web Bluetooth not supported in this browser';
+        } else {
+            logToMonitor('Web Bluetooth API is available! Click "Connect" to begin.');
+        }
+    </script>
+</body>
+</html>

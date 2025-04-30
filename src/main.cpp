@@ -15,17 +15,27 @@
 #include "tahoma10pt7b.h" // Include the 10pt font file
 #include <math.h> // Add this include for isnan()
 #include <WiFi.h> // Include the WiFi library
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 
 // Correct pin definitions for LilyGO E-Paper Watch
 #define GPS_RX 21
 #define GPS_TX 22
 #define GPS_BAUD 9600
 
+// Pin definitions
 #define PIN_MOTOR 4
 #define PIN_KEY 35
 #define PWR_EN 5
 #define Backlight 33
 #define Bat_ADC 34
+
+// BLE Service and Characteristic UUIDs
+#define SERVICE_UUID           "7a41c6c2-e9cd-4136-9cbd-8a791086a566"
+#define LOCATION_CHAR_UUID     "98dcc5a5-d9fb-4fcc-be63-bf8a2eb4bcb4"
+#define RESPONSE_CHAR_UUID     "5bc4de8a-ed52-41a7-9e53-f8e927a0ee55"
 
 #define SPI_SCK 14
 #define SPI_DIN 13
@@ -51,13 +61,28 @@
 #define GPS_WAIT_TIMEOUT 600000 // 10 minutes in milliseconds
 
 // EEPROM addresses (no overlap!)
-#define EEPROM_SIZE 29 // Increased for flight hours storage
+#define EEPROM_SIZE 74 // Increased for BLE location storage
 #define HOME_LAT_ADDR 0              // double, 8 bytes
 #define HOME_LON_ADDR 8              // double, 8 bytes
 #define FUEL_LITRES_ADDR 16          // float, 4 bytes
 #define FUEL_BURNRATE_ADDR 20        // float, 4 bytes
 #define FUEL_VISIBLE_ADDR 24         // uint8_t, 1 byte
 #define FLIGHT_HOURS_ADDR 25         // float, 4 bytes (NEW)
+#define BLE_LOC1_LAT_ADDR 29         // double, 8 bytes
+#define BLE_LOC1_LON_ADDR 37         // double, 8 bytes
+#define BLE_LOC1_ACTIVE_ADDR 45      // uint8_t, 1 byte
+#define BLE_LOC2_LAT_ADDR 46         // double, 8 bytes
+#define BLE_LOC2_LON_ADDR 54         // double, 8 bytes
+#define BLE_LOC2_ACTIVE_ADDR 62      // uint8_t, 1 byte
+#define BLE_LOC3_LAT_ADDR 63         // double, 8 bytes
+#define BLE_LOC3_LON_ADDR 71         // double, 8 bytes
+#define BLE_LOC3_ACTIVE_ADDR 79      // uint8_t, 1 byte
+#define BLE_LOC4_LAT_ADDR 80         // double, 8 bytes
+#define BLE_LOC4_LON_ADDR 88         // double, 8 bytes
+#define BLE_LOC4_ACTIVE_ADDR 96      // uint8_t, 1 byte
+#define BLE_LOC5_LAT_ADDR 97         // double, 8 bytes
+#define BLE_LOC5_LON_ADDR 105        // double, 8 bytes
+#define BLE_LOC5_ACTIVE_ADDR 113     // uint8_t, 1 byte
 
 // Change detection thresholds
 #define SPEED_CHANGE_THRESHOLD 1.0     // km/h
@@ -78,7 +103,75 @@ GxEPD_Class display(io, /*RST=*/EPD_RESET, /*BUSY=*/EPD_BUSY);
 TinyGPSPlus gps;
 HardwareSerial GPSSerial(1);
 
-// Home location
+// BLE definitions
+BLEServer *pServer = NULL;
+BLECharacteristic *pLocationCharacteristic = NULL;
+BLECharacteristic *pResponseCharacteristic = NULL;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+
+// BLE location data storage
+struct BLELocation {
+  String name;
+  double lat;
+  double lon;
+  bool active;
+};
+
+#define MAX_BLE_LOCATIONS 5
+BLELocation bleLocations[MAX_BLE_LOCATIONS];
+
+// Forward declarations
+void parseLocationData(std::string data);
+
+// BLE server connection handler class
+class MyServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    digitalWrite(PIN_MOTOR, HIGH); // Vibrate to indicate connection
+    delay(200);
+    digitalWrite(PIN_MOTOR, LOW);
+    pResponseCharacteristic->setValue("Connected to Mini ENAV");
+    pResponseCharacteristic->notify();
+  }
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    // Restart advertising to allow reconnection
+    pServer->getAdvertising()->start();
+  }
+};
+
+// BLE location data callback class
+class LocationCallbacks: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    std::string value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      parseLocationData(value);
+    }
+  }
+};
+
+// Forward declarations of functions
+void setCustomCpuFrequencyMhz(uint32_t frequency);
+void updateBatteryLevel();
+void drawBackground();
+void drawRingWithGaps(int radius);
+void drawArcSegment(int radius, int angle);
+void updateGPSData();
+void updateCenterDisplay();
+void updateNavigationIndicators();
+void setNewHomePoint();
+void prepareForSleep();
+void updateTextArea(int x, int y, int w, int h, char* text, int textX, int textY);
+void drawRotatingDot();
+int getBatteryPercent();
+void drawBatteryIcon(int x, int y, int width, int height, int percentage);
+void drawSatelliteIcon(int x, int y, int size);
+void drawJerryCan(int x, int y, int width, int height);
+void enterSettingsScreen();
+void drawCompassRose(int cx, int cy, int radius, float headingDegrees);
+
 double homeLat = 0.0;
 double homeLon = 0.0;
 bool homeSet = false;
@@ -148,26 +241,6 @@ unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 50; // 50ms debounce delay
 bool lastButtonState = HIGH; // Assume button is not pressed initially
 
-// Function prototypes
-void setCustomCpuFrequencyMhz(uint32_t frequency);
-void updateBatteryLevel();
-void drawBackground();
-void drawRingWithGaps(int radius);
-void drawArcSegment(int radius, int angle);
-void updateGPSData();
-void updateCenterDisplay();
-void updateNavigationIndicators();
-void setNewHomePoint();
-void prepareForSleep();
-void updateTextArea(int x, int y, int w, int h, char* text, int textX, int textY);
-void drawRotatingDot();
-int getBatteryPercent();
-void drawBatteryIcon(int x, int y, int width, int height, int percentage);
-void drawSatelliteIcon(int x, int y, int size);
-void drawJerryCan(int x, int y, int width, int height);
-void enterSettingsScreen();
-void drawCompassRose(int cx, int cy, int radius, float headingDegrees);
-
 void setup() {
   // Reduce the CPU frequency to 40 MHz for lower power consumption
   setCustomCpuFrequencyMhz(40); // Reduced from 80 MHz to 40 MHz
@@ -182,13 +255,44 @@ void setup() {
   pinMode(Backlight, OUTPUT);
   digitalWrite(Backlight, LOW);
   
-  // Disable Wi-Fi and BLE to save power
-  WiFi.mode(WIFI_OFF);
-  btStop();
+  // Initialize button and motor with correct pins
+  pinMode(PIN_KEY, INPUT_PULLUP);
+  pinMode(PIN_MOTOR, OUTPUT);
+  digitalWrite(PIN_MOTOR, LOW); // Motor is explicitly set to LOW here
   
-  // Set GPS to higher update rate (if supported)
-  delay(100);
- // GPSSerial.println("$PMTK220,200*2C"); // Set update rate to 5Hz (200ms)
+  // Enable power to peripherals
+  pinMode(PWR_EN, OUTPUT);
+  digitalWrite(PWR_EN, HIGH);
+  
+  // --- Add startup vibration ---
+  digitalWrite(PIN_MOTOR, HIGH);
+  delay(150); // Vibrate for 150ms
+  digitalWrite(PIN_MOTOR, LOW);
+  // --- End startup vibration ---
+  
+  // We don't fully disable WiFi and BLE anymore, as we need BLE
+  WiFi.mode(WIFI_OFF);
+  
+  // Initialize BLE
+  BLEDevice::init("Mini ENAV");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pLocationCharacteristic = pService->createCharacteristic(
+    LOCATION_CHAR_UUID,
+    BLECharacteristic::PROPERTY_WRITE
+  );
+  pLocationCharacteristic->setCallbacks(new LocationCallbacks());
+
+  pResponseCharacteristic = pService->createCharacteristic(
+    RESPONSE_CHAR_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pResponseCharacteristic->addDescriptor(new BLE2902());
+
+  pService->start();
+  pServer->getAdvertising()->start();
 
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
@@ -200,31 +304,6 @@ void setup() {
   }
   EEPROM.commit();
   */
-
-  // Initialize display with optimized settings
-  display.init(0); // false = partial updates possible
-  display.setRotation(0);
-  display.setTextColor(GxEPD_BLACK);
-  display.setFont(&FreeMonoBold9pt7b);
-  
-  // Clear the display at startup
-  display.fillRect(0, 0, 200, 200, GxEPD_WHITE); // Draw a 200x200 white box
-  display.updateWindow(0, 0, 200, 200); // Partial update for the entire screen
-  
-  // Enable power to peripherals
-  pinMode(PWR_EN, OUTPUT);
-  digitalWrite(PWR_EN, HIGH);
-
-  // Initialize button and motor with correct pins
-  pinMode(PIN_KEY, INPUT_PULLUP);
-  pinMode(PIN_MOTOR, OUTPUT);
-  digitalWrite(PIN_MOTOR, LOW); // Motor is explicitly set to LOW here
-  
-  // --- Add startup vibration ---
-  digitalWrite(PIN_MOTOR, HIGH);
-  delay(150); // Vibrate for 150ms
-  digitalWrite(PIN_MOTOR, LOW);
-  // --- End startup vibration ---
 
   // Load home position from EEPROM
   EEPROM.get(HOME_LAT_ADDR, homeLat);
@@ -251,6 +330,16 @@ void setup() {
   EEPROM.get(FLIGHT_HOURS_ADDR, totalFlightHours);
   if (isnan(totalFlightHours) || totalFlightHours < 0) totalFlightHours = 0.0f;
 
+  // Initialize display with optimized settings
+  display.init(0); // false = partial updates possible
+  display.setRotation(0);
+  display.setTextColor(GxEPD_BLACK);
+  display.setFont(&FreeMonoBold9pt7b);
+  
+  // Clear the display at startup
+  display.fillRect(0, 0, 200, 200, GxEPD_WHITE); // Draw a 200x200 white box
+  display.updateWindow(0, 0, 200, 200); // Partial update for the entire screen
+
   // Initial full screen draw
   display.fillScreen(GxEPD_WHITE);
   drawBackground();
@@ -267,6 +356,132 @@ void setup() {
 
   // Initialize GPS waiting timeout
   gpsWaitStartTime = millis();
+}
+
+void parseLocationData(std::string data) {
+  String dataStr = String(data.c_str());
+  
+  // Expected format: "Name-Lat-Lon-ON" or "Name-Lat-Lon-OFF"
+  int firstDash = dataStr.indexOf('-');
+  int secondDash = dataStr.indexOf('-', firstDash + 1);
+  int thirdDash = dataStr.indexOf('-', secondDash + 1);
+  
+  if (firstDash == -1 || secondDash == -1 || thirdDash == -1) {
+    pResponseCharacteristic->setValue("Invalid format. Use Name-Lat-Lon-ON/OFF");
+    pResponseCharacteristic->notify();
+    return;
+  }
+  
+  String name = dataStr.substring(0, firstDash);
+  String latStr = dataStr.substring(firstDash + 1, secondDash);
+  String lonStr = dataStr.substring(secondDash + 1, thirdDash);
+  String activeStr = dataStr.substring(thirdDash + 1);
+  
+  // For debugging
+  char debugMsg[200];
+  sprintf(debugMsg, "Received: name=%s, lat=%s, lon=%s, active=%s", 
+          name.c_str(), latStr.c_str(), lonStr.c_str(), activeStr.c_str());
+  pResponseCharacteristic->setValue(debugMsg);
+  pResponseCharacteristic->notify();
+  
+  double lat = latStr.toDouble();
+  double lon = lonStr.toDouble();
+  bool active = (activeStr == "ON");
+  
+  // Store in first available slot or update existing
+  bool updated = false;
+  int slotIndex = -1;
+  
+  // First look for an existing slot with the same name
+  for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
+    if (bleLocations[i].name == name) {
+      slotIndex = i;
+      break;
+    }
+  }
+  
+  // If not found, look for the first empty slot
+  if (slotIndex == -1) {
+    for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
+      if (bleLocations[i].name == "") {
+        slotIndex = i;
+        break;
+      }
+    }
+  }
+  
+  // If we found a slot, update it
+  if (slotIndex != -1) {
+    bleLocations[slotIndex].name = name;
+    bleLocations[slotIndex].lat = lat;
+    bleLocations[slotIndex].lon = lon;
+    bleLocations[slotIndex].active = active;
+    updated = true;
+    
+    // Save to EEPROM based on the location number
+    if (name == "1") {
+      if (active) {
+        homeLat = lat;
+        homeLon = lon;
+        homeSet = true;
+        
+        // Save to home EEPROM addresses
+        EEPROM.put(HOME_LAT_ADDR, homeLat);
+        EEPROM.put(HOME_LON_ADDR, homeLon);
+      }
+      // Always save to BLE location 1 EEPROM address
+      EEPROM.put(BLE_LOC1_LAT_ADDR, lat);
+      EEPROM.put(BLE_LOC1_LON_ADDR, lon);
+      EEPROM.put(BLE_LOC1_ACTIVE_ADDR, active ? 1 : 0);
+    } 
+    else if (name == "2") {
+      EEPROM.put(BLE_LOC2_LAT_ADDR, lat);
+      EEPROM.put(BLE_LOC2_LON_ADDR, lon);
+      EEPROM.put(BLE_LOC2_ACTIVE_ADDR, active ? 1 : 0);
+    }
+    else if (name == "3") {
+      EEPROM.put(BLE_LOC3_LAT_ADDR, lat);
+      EEPROM.put(BLE_LOC3_LON_ADDR, lon);
+      EEPROM.put(BLE_LOC3_ACTIVE_ADDR, active ? 1 : 0);
+    }
+    else if (name == "4") {
+      EEPROM.put(BLE_LOC4_LAT_ADDR, lat);
+      EEPROM.put(BLE_LOC4_LON_ADDR, lon);
+      EEPROM.put(BLE_LOC4_ACTIVE_ADDR, active ? 1 : 0);
+    }
+    else if (name == "5") {
+      EEPROM.put(BLE_LOC5_LAT_ADDR, lat);
+      EEPROM.put(BLE_LOC5_LON_ADDR, lon);
+      EEPROM.put(BLE_LOC5_ACTIVE_ADDR, active ? 1 : 0);
+    }
+    
+    EEPROM.commit();
+    
+    // Force screen update after receiving location
+    lastUpdateTime = 0;
+    
+    // Vibrate to confirm receipt
+    digitalWrite(PIN_MOTOR, HIGH);
+    delay(100);
+    digitalWrite(PIN_MOTOR, LOW);
+  }
+  
+  // Send final response
+  delay(500); // Small delay to ensure debug message is sent first
+  
+  char response[100];
+  if (updated) {
+    if (active) {
+      snprintf(response, sizeof(response), "Location %s set at %.6f, %.6f (Active)", name.c_str(), lat, lon);
+    } else {
+      snprintf(response, sizeof(response), "Location %s disabled", name.c_str());
+    }
+  } else {
+    snprintf(response, sizeof(response), "No free locations. Clear one first.");
+  }
+  
+  pResponseCharacteristic->setValue(response);
+  pResponseCharacteristic->notify();
 }
 
 void loop() {
@@ -743,11 +958,11 @@ void updateNavigationIndicators() {
 
     display.fillCircle(iconXTakeoff, iconYTakeoff, dotDrawRadiusTakeoff, GxEPD_BLACK);
 
-    // --- Add White '1' inside the dot ---
+    // --- Add White 'T' inside the dot instead of '1' ---
     display.setFont(&tahoma15pt7b); // Use larger 15pt font
     display.setTextColor(GxEPD_WHITE);   // Set text color to white
 
-    String takeoffChar = "1";
+    String takeoffChar = "T";
     int16_t tbxTakeoff, tbyTakeoff; uint16_t tbwTakeoff, tbhTakeoff;
     display.getTextBounds(takeoffChar, 0, 0, &tbxTakeoff, &tbyTakeoff, &tbwTakeoff, &tbhTakeoff);
 
@@ -756,6 +971,49 @@ void updateNavigationIndicators() {
 
     display.setCursor(textXTakeoff, textYTakeoff);
     display.print(takeoffChar);
+  }
+  
+  // --- BLE Location Indicators ---
+  for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
+    if (bleLocations[i].name != "" && bleLocations[i].active) {
+      // Calculate distance and bearing to the BLE location
+      double distToLocation = TinyGPSPlus::distanceBetween(
+        currentLat, currentLon, bleLocations[i].lat, bleLocations[i].lon) / 1000.0; // Distance in KM
+      
+      double courseToLocation = TinyGPSPlus::courseTo(
+        currentLat, currentLon, bleLocations[i].lat, bleLocations[i].lon);
+      
+      // Calculate relative bearing
+      float relativeBearingLocation = courseToLocation - currentCourse;
+      if (relativeBearingLocation < 0) relativeBearingLocation += 360;
+      if (relativeBearingLocation >= 360) relativeBearingLocation -= 360;
+      
+      float radiansLocation = relativeBearingLocation * PI / 180.0;
+      
+      // Calculate icon position
+      int iconRadiusLocation = INNER_RADIUS + 16; // Same as other icons
+      int iconXLocation = CENTER_X + int(iconRadiusLocation * sin(radiansLocation));
+      int iconYLocation = CENTER_Y - int(iconRadiusLocation * cos(radiansLocation));
+      int dotDrawRadiusLocation = 15; // Same as other icons
+      
+      // Draw the icon
+      display.fillCircle(iconXLocation, iconYLocation, dotDrawRadiusLocation, GxEPD_BLACK);
+      
+      // Draw the location number inside the dot
+      display.setFont(&tahoma15pt7b);
+      display.setTextColor(GxEPD_WHITE);
+      
+      // Get the location number
+      String locationNumChar = bleLocations[i].name;
+      int16_t tbxLocation, tbyLocation; uint16_t tbwLocation, tbhLocation;
+      display.getTextBounds(locationNumChar, 0, 0, &tbxLocation, &tbyLocation, &tbwLocation, &tbhLocation);
+      
+      int textXLocation = iconXLocation - tbwLocation / 2 - tbxLocation; // Center horizontally
+      int textYLocation = iconYLocation + tbhLocation / 2 - tbyLocation / 2 - 8; // Center vertically
+      
+      display.setCursor(textXLocation, textYLocation);
+      display.print(locationNumChar);
+    }
   }
 
   // Reset text color to black for other drawing elements
