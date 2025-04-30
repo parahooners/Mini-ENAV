@@ -330,6 +330,65 @@ void setup() {
   EEPROM.get(FLIGHT_HOURS_ADDR, totalFlightHours);
   if (isnan(totalFlightHours) || totalFlightHours < 0) totalFlightHours = 0.0f;
 
+  // Load BLE locations from EEPROM
+  double tempLat, tempLon;
+  uint8_t tempActive;
+  
+  // Load Location 1
+  EEPROM.get(BLE_LOC1_LAT_ADDR, tempLat);
+  EEPROM.get(BLE_LOC1_LON_ADDR, tempLon);
+  EEPROM.get(BLE_LOC1_ACTIVE_ADDR, tempActive);
+  if (tempLat != 0.0 || tempLon != 0.0) {
+    bleLocations[0].name = "1";
+    bleLocations[0].lat = tempLat;
+    bleLocations[0].lon = tempLon;
+    bleLocations[0].active = (tempActive != 0);
+  }
+  
+  // Load Location 2
+  EEPROM.get(BLE_LOC2_LAT_ADDR, tempLat);
+  EEPROM.get(BLE_LOC2_LON_ADDR, tempLon);
+  EEPROM.get(BLE_LOC2_ACTIVE_ADDR, tempActive);
+  if (tempLat != 0.0 || tempLon != 0.0) {
+    bleLocations[1].name = "2";
+    bleLocations[1].lat = tempLat;
+    bleLocations[1].lon = tempLon;
+    bleLocations[1].active = (tempActive != 0);
+  }
+  
+  // Load Location 3
+  EEPROM.get(BLE_LOC3_LAT_ADDR, tempLat);
+  EEPROM.get(BLE_LOC3_LON_ADDR, tempLon);
+  EEPROM.get(BLE_LOC3_ACTIVE_ADDR, tempActive);
+  if (tempLat != 0.0 || tempLon != 0.0) {
+    bleLocations[2].name = "3";
+    bleLocations[2].lat = tempLat;
+    bleLocations[2].lon = tempLon;
+    bleLocations[2].active = (tempActive != 0);
+  }
+  
+  // Load Location 4
+  EEPROM.get(BLE_LOC4_LAT_ADDR, tempLat);
+  EEPROM.get(BLE_LOC4_LON_ADDR, tempLon);
+  EEPROM.get(BLE_LOC4_ACTIVE_ADDR, tempActive);
+  if (tempLat != 0.0 || tempLon != 0.0) {
+    bleLocations[3].name = "4";
+    bleLocations[3].lat = tempLat;
+    bleLocations[3].lon = tempLon;
+    bleLocations[3].active = (tempActive != 0);
+  }
+  
+  // Load Location 5
+  EEPROM.get(BLE_LOC5_LAT_ADDR, tempLat);
+  EEPROM.get(BLE_LOC5_LON_ADDR, tempLon);
+  EEPROM.get(BLE_LOC5_ACTIVE_ADDR, tempActive);
+  if (tempLat != 0.0 || tempLon != 0.0) {
+    bleLocations[4].name = "5";
+    bleLocations[4].lat = tempLat;
+    bleLocations[4].lon = tempLon;
+    bleLocations[4].active = (tempActive != 0);
+  }
+
   // Initialize display with optimized settings
   display.init(0); // false = partial updates possible
   display.setRotation(0);
@@ -360,6 +419,27 @@ void setup() {
 
 void parseLocationData(std::string data) {
   String dataStr = String(data.c_str());
+  
+  // Check if this is a request to get current locations
+  if (dataStr == "GET_LOCATIONS") {
+    // Send all saved locations back to the client
+    for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
+      if (bleLocations[i].name != "") {
+        char locData[200];
+        snprintf(locData, sizeof(locData), 
+                 "LOC_DATA:{\"name\":\"%s\",\"lat\":%.6f,\"lon\":%.6f,\"active\":%s}", 
+                 bleLocations[i].name.c_str(), 
+                 bleLocations[i].lat, 
+                 bleLocations[i].lon, 
+                 bleLocations[i].active ? "true" : "false");
+        
+        pResponseCharacteristic->setValue(locData);
+        pResponseCharacteristic->notify();
+        delay(200); // Small delay between location notifications
+      }
+    }
+    return;
+  }
   
   // Expected format: "Name-Lat-Lon-ON" or "Name-Lat-Lon-OFF"
   int firstDash = dataStr.indexOf('-');
@@ -420,16 +500,8 @@ void parseLocationData(std::string data) {
     
     // Save to EEPROM based on the location number
     if (name == "1") {
-      if (active) {
-        homeLat = lat;
-        homeLon = lon;
-        homeSet = true;
-        
-        // Save to home EEPROM addresses
-        EEPROM.put(HOME_LAT_ADDR, homeLat);
-        EEPROM.put(HOME_LON_ADDR, homeLon);
-      }
-      // Always save to BLE location 1 EEPROM address
+      // IMPORTANT CHANGE: No longer automatically set location 1 as home
+      // Simply save to BLE location 1 EEPROM address
       EEPROM.put(BLE_LOC1_LAT_ADDR, lat);
       EEPROM.put(BLE_LOC1_LON_ADDR, lon);
       EEPROM.put(BLE_LOC1_ACTIVE_ADDR, active ? 1 : 0);
@@ -912,6 +984,17 @@ void updateTextArea(int x, int y, int w, int h, char* text, int textX, int textY
 }
 
 void updateNavigationIndicators() {
+  // --- Define collision detection variables ---
+  const int COLLISION_DISTANCE = 30; // Minimum pixel distance between icons
+  
+  // Arrays to store calculated positions and visibility of indicators
+  int iconX[MAX_BLE_LOCATIONS + 2] = {0}; // +2 for Home and Takeoff
+  int iconY[MAX_BLE_LOCATIONS + 2] = {0};
+  bool iconVisible[MAX_BLE_LOCATIONS + 2] = {false};
+  String iconLabels[MAX_BLE_LOCATIONS + 2];
+  
+  int numIcons = 0;
+  
   // --- Home Indicator ---
   float relativeBearingHome = courseToHome - currentCourse;
   if (relativeBearingHome < 0) relativeBearingHome += 360;
@@ -921,27 +1004,12 @@ void updateNavigationIndicators() {
 
   // Calculate icon position - moved out 1px
   int iconRadiusHome = INNER_RADIUS + 16; // Fixed radius (was 15)
-  int iconXHome = CENTER_X + int(iconRadiusHome * sin(radiansHome));
-  int iconYHome = CENTER_Y - int(iconRadiusHome * cos(radiansHome));
-  int dotDrawRadiusHome = 15; // Was 13
-
-  // Draw new icon - made 2px bigger (radius +2)
-  display.fillCircle(iconXHome, iconYHome, dotDrawRadiusHome, GxEPD_BLACK); // Use dotDrawRadius
-
-  // --- Add White 'H' inside the dot ---
-  display.setFont(&tahoma15pt7b); // Use larger 15pt font
-  display.setTextColor(GxEPD_WHITE);   // Set text color to white
-
-  String homeChar = "H";
-  int16_t tbx, tby; uint16_t tbw, tbh;
-  display.getTextBounds(homeChar, 0, 0, &tbx, &tby, &tbw, &tbh);
-
-  // Calculate position to center the 'H'
-  int textXHome = iconXHome - tbw / 2 - tbx; // Center horizontally
-  int textYHome = iconYHome + tbh / 2 - tby / 2 - 8; // Center vertically (approx) and move up 8px (was 6)
-
-  display.setCursor(textXHome, textYHome);
-  display.print(homeChar);
+  iconX[numIcons] = CENTER_X + int(iconRadiusHome * sin(radiansHome));
+  iconY[numIcons] = CENTER_Y - int(iconRadiusHome * cos(radiansHome));
+  iconVisible[numIcons] = true;  // Home is always visible
+  iconLabels[numIcons] = "H";
+  int homeIconIndex = numIcons;
+  numIcons++;
 
   // --- Takeoff Indicator ---
   if (takeoffSet) {
@@ -951,29 +1019,18 @@ void updateNavigationIndicators() {
 
     float radiansTakeoff = relativeBearingTakeoff * PI / 180.0;
 
-    int iconRadiusTakeoff = INNER_RADIUS + 16; // Fixed radius (was 15)
-    int iconXTakeoff = CENTER_X + int(iconRadiusTakeoff * sin(radiansTakeoff));
-    int iconYTakeoff = CENTER_Y - int(iconRadiusTakeoff * cos(radiansTakeoff));
-    int dotDrawRadiusTakeoff = 15; // Was 13
-
-    display.fillCircle(iconXTakeoff, iconYTakeoff, dotDrawRadiusTakeoff, GxEPD_BLACK);
-
-    // --- Add White 'T' inside the dot instead of '1' ---
-    display.setFont(&tahoma15pt7b); // Use larger 15pt font
-    display.setTextColor(GxEPD_WHITE);   // Set text color to white
-
-    String takeoffChar = "T";
-    int16_t tbxTakeoff, tbyTakeoff; uint16_t tbwTakeoff, tbhTakeoff;
-    display.getTextBounds(takeoffChar, 0, 0, &tbxTakeoff, &tbyTakeoff, &tbwTakeoff, &tbhTakeoff);
-
-    int textXTakeoff = iconXTakeoff - tbwTakeoff / 2 - tbxTakeoff; // Center horizontally
-    int textYTakeoff = iconYTakeoff + tbhTakeoff / 2 - tbyTakeoff / 2 - 8; // Center vertically (approx) and move up 8px (was 6)
-
-    display.setCursor(textXTakeoff, textYTakeoff);
-    display.print(takeoffChar);
+    int iconRadiusTakeoff = INNER_RADIUS + 16; // Fixed radius
+    iconX[numIcons] = CENTER_X + int(iconRadiusTakeoff * sin(radiansTakeoff));
+    iconY[numIcons] = CENTER_Y - int(iconRadiusTakeoff * cos(radiansTakeoff));
+    iconVisible[numIcons] = true;  // Takeoff is visible if set
+    iconLabels[numIcons] = "T";
+    int takeoffIconIndex = numIcons;
+    numIcons++;
   }
   
   // --- BLE Location Indicators ---
+  int bleIconIndices[MAX_BLE_LOCATIONS];
+  
   for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
     if (bleLocations[i].name != "" && bleLocations[i].active) {
       // Calculate distance and bearing to the BLE location
@@ -992,27 +1049,70 @@ void updateNavigationIndicators() {
       
       // Calculate icon position
       int iconRadiusLocation = INNER_RADIUS + 16; // Same as other icons
-      int iconXLocation = CENTER_X + int(iconRadiusLocation * sin(radiansLocation));
-      int iconYLocation = CENTER_Y - int(iconRadiusLocation * cos(radiansLocation));
-      int dotDrawRadiusLocation = 15; // Same as other icons
+      iconX[numIcons] = CENTER_X + int(iconRadiusLocation * sin(radiansLocation));
+      iconY[numIcons] = CENTER_Y - int(iconRadiusLocation * cos(radiansLocation));
+      iconVisible[numIcons] = true;  // Initially assume it's visible
+      iconLabels[numIcons] = bleLocations[i].name;
+      bleIconIndices[i] = numIcons;
+      numIcons++;
+    }
+  }
+  
+  // --- Check for collisions and prioritize visibility ---
+  // Priority: 1. Home, 2. Takeoff, 3. BLE locations
+  
+  // Start from the BLE locations and check if they collide with Home or Takeoff
+  for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
+    if (bleLocations[i].name != "" && bleLocations[i].active) {
+      int iconIndex = bleIconIndices[i];
       
+      // Check collision with Home
+      int dx = iconX[iconIndex] - iconX[homeIconIndex];
+      int dy = iconY[iconIndex] - iconY[homeIconIndex];
+      int distance = sqrt(dx*dx + dy*dy);
+      
+      if (distance < COLLISION_DISTANCE) {
+        // Collision with Home - Home has priority, so hide this BLE location
+        iconVisible[iconIndex] = false;
+        continue;  // Skip the rest of this iteration
+      }
+      
+      // Check collision with Takeoff if applicable
+      if (takeoffSet) {
+        int takeoffIndex = homeIconIndex + 1;  // Assuming Takeoff is right after Home
+        dx = iconX[iconIndex] - iconX[takeoffIndex];
+        dy = iconY[iconIndex] - iconY[takeoffIndex];
+        distance = sqrt(dx*dx + dy*dy);
+        
+        if (distance < COLLISION_DISTANCE) {
+          // Collision with Takeoff - Takeoff has priority
+          iconVisible[iconIndex] = false;
+        }
+      }
+    }
+  }
+  
+  // Draw all visible icons
+  int dotDrawRadius = 15;
+  display.setFont(&tahoma15pt7b);
+  
+  for (int i = 0; i < numIcons; i++) {
+    if (iconVisible[i]) {
       // Draw the icon
-      display.fillCircle(iconXLocation, iconYLocation, dotDrawRadiusLocation, GxEPD_BLACK);
+      display.fillCircle(iconX[i], iconY[i], dotDrawRadius, GxEPD_BLACK);
       
-      // Draw the location number inside the dot
-      display.setFont(&tahoma15pt7b);
+      // Draw the label inside the dot
       display.setTextColor(GxEPD_WHITE);
       
-      // Get the location number
-      String locationNumChar = bleLocations[i].name;
-      int16_t tbxLocation, tbyLocation; uint16_t tbwLocation, tbhLocation;
-      display.getTextBounds(locationNumChar, 0, 0, &tbxLocation, &tbyLocation, &tbwLocation, &tbhLocation);
+      String labelChar = iconLabels[i];
+      int16_t tbx, tby; uint16_t tbw, tbh;
+      display.getTextBounds(labelChar, 0, 0, &tbx, &tby, &tbw, &tbh);
       
-      int textXLocation = iconXLocation - tbwLocation / 2 - tbxLocation; // Center horizontally
-      int textYLocation = iconYLocation + tbhLocation / 2 - tbyLocation / 2 - 8; // Center vertically
+      int textX = iconX[i] - tbw / 2 - tbx; // Center horizontally
+      int textY = iconY[i] + tbh / 2 - tby / 2 - 8; // Center vertically
       
-      display.setCursor(textXLocation, textYLocation);
-      display.print(locationNumChar);
+      display.setCursor(textX, textY);
+      display.print(labelChar);
     }
   }
 
@@ -1021,17 +1121,67 @@ void updateNavigationIndicators() {
 }
 
 void setNewHomePoint() {
-  if (gps.location.isValid()) {
+  if (gps.location.isValid() && satellites >= 4) {  // Ensure we have a good GPS fix with enough satellites
+    // Get current coordinates
+    double newHomeLat = gps.location.lat();
+    double newHomeLon = gps.location.lng();
+    
+    // Extra validation - check that coordinates are reasonable
+    // If homeSet is already true, ensure the new location isn't too far from current location
+    if (homeSet) {
+      double distanceToNewHome = TinyGPSPlus::distanceBetween(
+        currentLat, currentLon, newHomeLat, newHomeLon) / 1000.0; // Distance in KM
+      
+      // If the new home is more than 1 kilometer away from current position, reject it
+      // This prevents setting home to erroneous GPS readings
+      if (distanceToNewHome > 1.0) {
+        // Alert user with quick triple vibration (error)
+        for (int i = 0; i < 3; i++) {
+          digitalWrite(PIN_MOTOR, HIGH);
+          delay(100);
+          digitalWrite(PIN_MOTOR, LOW);
+          delay(100);
+        }
+        
+        // Show error message
+        display.updateWindow(CENTER_X - INNER_RADIUS, CENTER_Y - INNER_RADIUS, 
+                           2 * INNER_RADIUS, 2 * INNER_RADIUS, true);
+        display.fillCircle(CENTER_X, CENTER_Y, INNER_RADIUS - 1, GxEPD_WHITE);
+        
+        display.setFont(&FreeMonoBold9pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        
+        String message = "GPS Error";
+        int16_t tbx, tby; uint16_t tbw, tbh;
+        display.getTextBounds(message, 0, 0, &tbx, &tby, &tbw, &tbh);
+        display.setCursor(CENTER_X - tbw / 2, CENTER_Y - 5);
+        display.print(message);
+        
+        message = "Try again";
+        display.getTextBounds(message, 0, 0, &tbx, &tby, &tbw, &tbh);
+        display.setCursor(CENTER_X - tbw / 2, CENTER_Y + 15);
+        display.print(message);
+        
+        display.updateWindow(0, 0, 200, 200);
+        delay(2000);
+        updateCenterDisplay();
+        return;
+      }
+    }
+    
+    // If we passed validation, set the new home point
     digitalWrite(PIN_MOTOR, HIGH);
     delay(200);
     digitalWrite(PIN_MOTOR, LOW);
 
-    homeLat = gps.location.lat();
-    homeLon = gps.location.lng();
+    homeLat = newHomeLat;
+    homeLon = newHomeLon;
     homeSet = true;
 
     // Clear takeoff indicator when new Home is set
     takeoffSet = false;
+    // Reset initial fix processing for takeoff detection
+    initialFixProcessed = false;
 
     EEPROM.put(HOME_LAT_ADDR, homeLat);
     EEPROM.put(HOME_LON_ADDR, homeLon);
@@ -1059,7 +1209,40 @@ void setNewHomePoint() {
 
     delay(2000);
 
+    // Set current distance to home to 0
     distanceToHome = 0;
+    updateCenterDisplay();
+  } else {
+    // Not enough GPS accuracy to set home point
+    // Alert user with quick double vibration (warning)
+    for (int i = 0; i < 2; i++) {
+      digitalWrite(PIN_MOTOR, HIGH);
+      delay(100);
+      digitalWrite(PIN_MOTOR, LOW);
+      delay(100);
+    }
+    
+    // Show error message
+    display.updateWindow(CENTER_X - INNER_RADIUS, CENTER_Y - INNER_RADIUS, 
+                       2 * INNER_RADIUS, 2 * INNER_RADIUS, true);
+    display.fillCircle(CENTER_X, CENTER_Y, INNER_RADIUS - 1, GxEPD_WHITE);
+    
+    display.setFont(&FreeMonoBold9pt7b);
+    display.setTextColor(GxEPD_BLACK);
+    
+    String message = "Wait for";
+    int16_t tbx, tby; uint16_t tbw, tbh;
+    display.getTextBounds(message, 0, 0, &tbx, &tby, &tbw, &tbh);
+    display.setCursor(CENTER_X - tbw / 2, CENTER_Y - 5);
+    display.print(message);
+    
+    message = "GPS fix";
+    display.getTextBounds(message, 0, 0, &tbx, &tby, &tbw, &tbh);
+    display.setCursor(CENTER_X - tbw / 2, CENTER_Y + 15);
+    display.print(message);
+    
+    display.updateWindow(0, 0, 200, 200);
+    delay(2000);
     updateCenterDisplay();
   }
 }

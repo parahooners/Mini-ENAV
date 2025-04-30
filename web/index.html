@@ -185,6 +185,7 @@
         const ENAV_SERVICE_UUID = "7a41c6c2-e9cd-4136-9cbd-8a791086a566";
         const LOCATION_CHAR_UUID = "98dcc5a5-d9fb-4fcc-be63-bf8a2eb4bcb4";
         const RESPONSE_CHAR_UUID = "5bc4de8a-ed52-41a7-9e53-f8e927a0ee55";
+        const LOCATIONS_LIST_UUID = "7bc4de8a-ed52-41a7-9e53-f8e927a0ee56"; // New characteristic for getting locations list
         
         // Global BLE variables
         let bleDevice = null;
@@ -258,6 +259,9 @@
                 bleDevice.addEventListener('gattserverdisconnected', handleDisconnect);
                 
                 logToMonitor('Connected to Mini ENAV!');
+                
+                // Request saved locations from the device
+                await requestSavedLocations();
             } catch (error) {
                 logToMonitor(`Connection error: ${error}`);
                 connectionStatus.textContent = `Connection failed: ${error}`;
@@ -295,7 +299,53 @@
         // Handle notifications from the response characteristic
         function handleResponseNotification(event) {
             const value = new TextDecoder().decode(event.target.value);
-            logToMonitor(`Response: ${value}`);
+            
+            // Check if the message is a location data response
+            if (value.startsWith("LOC_DATA:")) {
+                try {
+                    // Parse the location data from the response
+                    const locData = value.substring(9); // Remove "LOC_DATA:" prefix
+                    const locationObj = JSON.parse(locData);
+                    
+                    // Add to saved locations and update UI
+                    savedLocations[locationObj.name] = locationObj;
+                    updateLocationsList();
+                    
+                    // Add marker to map
+                    updateMapMarker(
+                        locationObj.name, 
+                        locationObj.lat, 
+                        locationObj.lon, 
+                        locationObj.active ? "ON" : "OFF"
+                    );
+                    
+                    logToMonitor(`Loaded location ${locationObj.name} from device`);
+                } catch (error) {
+                    logToMonitor(`Error parsing location data: ${error}`);
+                }
+            } else {
+                logToMonitor(`Response: ${value}`);
+            }
+        }
+        
+        // Request stored locations from the device
+        async function requestSavedLocations() {
+            if (!locationChar) {
+                logToMonitor('Not connected to device!');
+                return;
+            }
+            
+            logToMonitor('Requesting saved locations from Mini ENAV...');
+            
+            try {
+                // Send request for locations
+                const encoder = new TextEncoder();
+                await locationChar.writeValue(encoder.encode("GET_LOCATIONS"));
+                
+                logToMonitor('Location request sent. Waiting for device response...');
+            } catch (error) {
+                logToMonitor(`Request error: ${error}`);
+            }
         }
         
         // Send location to device

@@ -19,6 +19,11 @@ This project turns a nifty little LilyGO E-Paper Watch into a minimalist navigat
 - **Navigation Indicators**:
   - Displays distance and heading to a home point or takeoff point.
   - Updates dynamically based on GPS data.
+  - Support for up to 5 custom Points of Interest (POIs) that can be saved and tracked.
+- **Bluetooth LE Connectivity**:
+  - Connect with a web interface through your phone's browser to manage waypoints.
+  - Save, activate, and deactivate custom locations remotely.
+  - View all saved locations when connecting to the device.
 - **Fuel Tracking**:
   - Tracks remaining fuel in liters.
   - Displays estimated flight time based on fuel burn rate.
@@ -34,7 +39,6 @@ This project turns a nifty little LilyGO E-Paper Watch into a minimalist navigat
 - **Energy Efficiency**:
   - CPU frequency reduced to **40 MHz** to maximize power efficiency.
   - E-paper display refresh rate optimized to 0.8 seconds.
-  - Wi-Fi and Bluetooth disabled to conserve energy.
   - Deep sleep mode implemented for inactivity.
 - **Haptic Feedback**:
   - Vibration motor for tactile feedback during key actions.
@@ -91,21 +95,22 @@ A 3D-printable case is available for this project.
 1. **Power On:**  
    Device starts and waits for GPS fix ("Wait GPS" message).
 2. **Set Home Point:**  
-   Press and hold the button until vibration. The current GPS location is saved as "Home".
-3. **Takeoff Point:**  
-   After moving >500m from Home, the device marks your takeoff location automatically.
+   Short press the button to set your current location as "Home". The device validates GPS accuracy to ensure reliable home points.
+3. **Takeoff Point Detection:**  
+   After moving >500m from Home, the device automatically marks your takeoff location with a "T" indicator.
 4. **Display Overview:**
    - **Center:** Distance to Home (in meters if you're close, kilometers if you're further out). Speed shown below.
    - **Top Right:** Altitude (feet)
    - **Bottom Left:** Battery percentage
    - **Bottom Right:** Number of satellites
-   - **Ring Dots:**  
+   - **Ring Indicators:**  
      - "H" = Home direction  
-     - "1" = Takeoff point direction
-5. **Follow the Dot:**  
-   Walk (or fly, or paddle!) in the direction the dot is pointing. As you get closer, the distance number will drop.
+     - "T" = Takeoff point direction
+     - "1-5" = Custom waypoint directions (when set via BLE)
+5. **Long Press (5 seconds):**  
+   Long-press the button for 5 seconds to enter sleep mode.
 6. **Sleep Mode:**  
-   Device sleeps after 10 minutes of inactivity. Press the button to wake.
+   Device also enters sleep after 10 minutes of inactivity. Press the button to wake.
 7. **Charging:**  
    Charge via USB as per your ESP32 board's instructions.
 
@@ -123,21 +128,66 @@ To change a value, press the button while the selection box is on the desired se
 
 ---
 
+## Web Interface (Bluetooth LE)
+
+The Mini ENAV now includes Bluetooth LE connectivity with a web interface for managing waypoints:
+
+1. **Accessing the Web Interface:**
+   - Use a Web Bluetooth compatible browser (Chrome, Edge, or Opera on Android/Windows/Mac)
+   - Open the `web/index.html` file locally or host it on a website
+   - Click "Connect to Mini ENAV" to establish a connection
+
+2. **Managing Waypoints:**
+   - **View Saved Locations:** When connected, all saved waypoints are displayed automatically
+   - **Add/Update Waypoint:**
+     - Select a location number (1-5)
+     - Set status (ON/OFF)
+     - Enter coordinates manually or click on the map
+     - Click "Send Location"
+   - **Modify Waypoint:** Click "Load" on an existing waypoint to edit it
+
+3. **Navigation Interface:**
+   - The map displays all active waypoints
+   - Each waypoint appears as a numbered marker
+   - The device shows directions to active waypoints on the display
+
+4. **Notes:**
+   - The web interface works best on mobile phones for on-the-go waypoint management
+   - Waypoints persist through device reboots and power cycles
+   - A maximum of 5 custom waypoints can be stored
+
+---
+
 ## Recent Updates
 
-### 1. **Settings Screen Enhancements**
+### April 2025 Updates
+
+### 1. **Bluetooth LE Integration**
+- Added Bluetooth LE connectivity for managing waypoints via a web interface
+- Implemented a web-based interface for saving, viewing and managing waypoints
+- Added support for up to 5 custom Points of Interest that appear on the navigation display
+
+### 2. **Improved Home Point Management**
+- Enhanced GPS validation when setting home points to prevent erroneous coordinates
+- Added safeguards against sudden jumps in home position due to GPS errors
+- Implemented proper separation between home point and custom waypoints
+- Better visual feedback when setting home points, including error messages for unreliable GPS data
+
+### 3. **Better Collision Detection for Navigation Indicators**
+- Implemented priority-based rendering of navigation indicators
+- Prevented overlap between home point, takeoff point, and custom waypoints
+- Ensured that critical indicators (home, takeoff) always remain visible
+
+### Previous Updates
+
 - Labels are now aligned to the far left for improved readability.
 - Added the ability to adjust:
   - **Fuel quantity**: Set the current fuel level in liters.
   - **Fuel burn rate**: Adjust the fuel consumption rate in liters per hour.
   - **Fuel display visibility**: Toggle the visibility of the fuel display.
 - Displays **estimated flight time** based on the current fuel and burn rate.
-
-### 2. **Flight Hours Tracking**
 - Total flight hours are now displayed on the "Wait GPS" screen.
 - Flight hours are stored persistently in EEPROM and updated periodically during flight.
-
-### 3. **Energy Efficiency Improvements**
 - CPU frequency reduced to **40 MHz** to conserve power.
 - E-paper display refresh rate optimized to match its 0.8-second refresh limitation.
 - All unnecessary `Serial.print` debugging statements have been removed to save power.
@@ -150,6 +200,7 @@ To change a value, press the button while the selection box is on the desired se
 - Ensure GPS has a clear view of the sky for best accuracy.
 - Battery voltage calibration may be needed for your hardware.
 - For 3D case printing, adjust STL scaling as needed for your printer and hardware tolerances.
+- Web Bluetooth is not supported on iOS devices (iPhone/iPad).
 
 ---
 
