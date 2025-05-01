@@ -61,7 +61,7 @@
 #define GPS_WAIT_TIMEOUT 600000 // 10 minutes in milliseconds
 
 // EEPROM addresses (no overlap!)
-#define EEPROM_SIZE 74 // Increased for BLE location storage
+#define EEPROM_SIZE 120 // Increased to properly store all 5 BLE locations
 #define HOME_LAT_ADDR 0              // double, 8 bytes
 #define HOME_LON_ADDR 8              // double, 8 bytes
 #define FUEL_LITRES_ADDR 16          // float, 4 bytes
@@ -425,13 +425,19 @@ void parseLocationData(std::string data) {
     // Send all saved locations back to the client
     for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
       if (bleLocations[i].name != "") {
-        char locData[200];
-        snprintf(locData, sizeof(locData), 
-                 "LOC_DATA:{\"name\":\"%s\",\"lat\":%.6f,\"lon\":%.6f,\"active\":%s}", 
+        // Create a buffer with precise formatting control
+        char jsonBuffer[100];
+        // Format the JSON data separately to ensure no formatting issues with negative numbers
+        snprintf(jsonBuffer, sizeof(jsonBuffer), 
+                 "{\"name\":\"%s\",\"lat\":%.6f,\"lon\":%.6f,\"active\":%s}", 
                  bleLocations[i].name.c_str(), 
                  bleLocations[i].lat, 
                  bleLocations[i].lon, 
                  bleLocations[i].active ? "true" : "false");
+                 
+        // Then add the prefix separately
+        char locData[200];
+        sprintf(locData, "LOC_DATA:%s", jsonBuffer);
         
         pResponseCharacteristic->setValue(locData);
         pResponseCharacteristic->notify();
@@ -442,25 +448,48 @@ void parseLocationData(std::string data) {
   }
   
   // Expected format: "Name-Lat-Lon-ON" or "Name-Lat-Lon-OFF"
+  // Modified parsing to handle negative coordinates correctly
   int firstDash = dataStr.indexOf('-');
-  int secondDash = dataStr.indexOf('-', firstDash + 1);
-  int thirdDash = dataStr.indexOf('-', secondDash + 1);
-  
-  if (firstDash == -1 || secondDash == -1 || thirdDash == -1) {
+  if (firstDash == -1) {
     pResponseCharacteristic->setValue("Invalid format. Use Name-Lat-Lon-ON/OFF");
     pResponseCharacteristic->notify();
     return;
   }
   
   String name = dataStr.substring(0, firstDash);
-  String latStr = dataStr.substring(firstDash + 1, secondDash);
-  String lonStr = dataStr.substring(secondDash + 1, thirdDash);
-  String activeStr = dataStr.substring(thirdDash + 1);
+  
+  // Find the position of ON/OFF at the end to work backwards
+  int statusPos = -1;
+  if (dataStr.endsWith("-ON")) {
+    statusPos = dataStr.length() - 3;
+  } else if (dataStr.endsWith("-OFF")) {
+    statusPos = dataStr.length() - 4;
+  } else {
+    pResponseCharacteristic->setValue("Invalid format. Status must be ON or OFF");
+    pResponseCharacteristic->notify();
+    return;
+  }
+  
+  // Get the status string
+  String activeStr = dataStr.substring(statusPos + 1);
+  
+  // Now find the separator between lat and lon by searching backwards from statusPos
+  int lastDash = dataStr.lastIndexOf('-', statusPos - 1);
+  if (lastDash == -1 || lastDash <= firstDash) {
+    pResponseCharacteristic->setValue("Invalid format. Could not parse coordinates");
+    pResponseCharacteristic->notify();
+    return;
+  }
+  
+  // Extract lat and lon
+  String latStr = dataStr.substring(firstDash + 1, lastDash);
+  String lonStr = dataStr.substring(lastDash + 1, statusPos);
   
   // For debugging
   char debugMsg[200];
-  sprintf(debugMsg, "Received: name=%s, lat=%s, lon=%s, active=%s", 
-          name.c_str(), latStr.c_str(), lonStr.c_str(), activeStr.c_str());
+  snprintf(debugMsg, sizeof(debugMsg), 
+           "Received: name=%s, lat=%s, lon=%s, active=%s", 
+           name.c_str(), latStr.c_str(), lonStr.c_str(), activeStr.c_str());
   pResponseCharacteristic->setValue(debugMsg);
   pResponseCharacteristic->notify();
   
@@ -500,8 +529,6 @@ void parseLocationData(std::string data) {
     
     // Save to EEPROM based on the location number
     if (name == "1") {
-      // IMPORTANT CHANGE: No longer automatically set location 1 as home
-      // Simply save to BLE location 1 EEPROM address
       EEPROM.put(BLE_LOC1_LAT_ADDR, lat);
       EEPROM.put(BLE_LOC1_LON_ADDR, lon);
       EEPROM.put(BLE_LOC1_ACTIVE_ADDR, active ? 1 : 0);
@@ -992,6 +1019,7 @@ void updateNavigationIndicators() {
   int iconY[MAX_BLE_LOCATIONS + 2] = {0};
   bool iconVisible[MAX_BLE_LOCATIONS + 2] = {false};
   String iconLabels[MAX_BLE_LOCATIONS + 2];
+  int iconIndexMap[MAX_BLE_LOCATIONS] = {-1}; // Map bleLocations index to iconX/Y index
   
   int numIcons = 0;
   
@@ -1024,13 +1052,10 @@ void updateNavigationIndicators() {
     iconY[numIcons] = CENTER_Y - int(iconRadiusTakeoff * cos(radiansTakeoff));
     iconVisible[numIcons] = true;  // Takeoff is visible if set
     iconLabels[numIcons] = "T";
-    int takeoffIconIndex = numIcons;
     numIcons++;
   }
   
   // --- BLE Location Indicators ---
-  int bleIconIndices[MAX_BLE_LOCATIONS];
-  
   for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
     if (bleLocations[i].name != "" && bleLocations[i].active) {
       // Calculate distance and bearing to the BLE location
@@ -1053,7 +1078,7 @@ void updateNavigationIndicators() {
       iconY[numIcons] = CENTER_Y - int(iconRadiusLocation * cos(radiansLocation));
       iconVisible[numIcons] = true;  // Initially assume it's visible
       iconLabels[numIcons] = bleLocations[i].name;
-      bleIconIndices[i] = numIcons;
+      iconIndexMap[i] = numIcons; // Store the mapping between bleLocations index and icon index
       numIcons++;
     }
   }
@@ -1064,7 +1089,9 @@ void updateNavigationIndicators() {
   // Start from the BLE locations and check if they collide with Home or Takeoff
   for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
     if (bleLocations[i].name != "" && bleLocations[i].active) {
-      int iconIndex = bleIconIndices[i];
+      int iconIndex = iconIndexMap[i]; // Get the correct index in the icon arrays
+      
+      if (iconIndex == -1) continue; // Skip if not mapped (shouldn't happen)
       
       // Check collision with Home
       int dx = iconX[iconIndex] - iconX[homeIconIndex];
@@ -1079,9 +1106,9 @@ void updateNavigationIndicators() {
       
       // Check collision with Takeoff if applicable
       if (takeoffSet) {
-        int takeoffIndex = homeIconIndex + 1;  // Assuming Takeoff is right after Home
-        dx = iconX[iconIndex] - iconX[takeoffIndex];
-        dy = iconY[iconIndex] - iconY[takeoffIndex];
+        int takeoffIconIndex = homeIconIndex + 1;  // Assuming Takeoff is right after Home
+        dx = iconX[iconIndex] - iconX[takeoffIconIndex];
+        dy = iconY[iconIndex] - iconY[takeoffIconIndex];
         distance = sqrt(dx*dx + dy*dy);
         
         if (distance < COLLISION_DISTANCE) {

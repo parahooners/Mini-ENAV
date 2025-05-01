@@ -406,6 +406,10 @@
                 return;
             }
             
+            // Format coordinates with consistent decimal places
+            const formattedLat = parseFloat(lat).toFixed(6);
+            const formattedLon = parseFloat(lon).toFixed(6);
+            
             // Create icon based on the location name
             const markerIcon = L.divIcon({
                 html: `<div style="
@@ -425,10 +429,10 @@
                 iconSize: [28, 28]
             });
             
-            // Create the marker
+            // Create the marker with formatted coordinates
             markers[name] = L.marker([lat, lon], { icon: markerIcon })
                 .addTo(map)
-                .bindPopup(`Location ${name}<br>Lat: ${lat}<br>Lon: ${lon}`);
+                .bindPopup(`Location ${name}<br>Lat: ${formattedLat}<br>Lon: ${formattedLon}`);
             
             // Center map on the most recently added marker
             map.setView([lat, lon], 13);
@@ -440,11 +444,15 @@
             
             for (const id in savedLocations) {
                 const location = savedLocations[id];
+                // Format longitude with fixed 6 decimal places to ensure consistency
+                const formattedLat = parseFloat(location.lat).toFixed(6);
+                const formattedLon = parseFloat(location.lon).toFixed(6);
+                
                 const locationElement = document.createElement('div');
                 locationElement.className = 'location-item';
                 locationElement.innerHTML = `
-                    <strong>${location.name}</strong> (${location.status})<br>
-                    Lat: ${location.lat}, Lon: ${location.lon}
+                    <strong>${location.name}</strong> (${location.active ? "ON" : "OFF"})<br>
+                    Lat: ${formattedLat}, Lon: ${formattedLon}
                     <button class="load-btn" data-id="${location.name}">Load</button>
                 `;
                 locationList.appendChild(locationElement);
@@ -457,9 +465,9 @@
                     const location = savedLocations[id];
                     
                     locationNameSelect.value = location.name;
-                    locationStatusSelect.value = location.status;
-                    latitudeInput.value = location.lat;
-                    longitudeInput.value = location.lon;
+                    locationStatusSelect.value = location.active ? "ON" : "OFF";
+                    latitudeInput.value = parseFloat(location.lat).toFixed(6);
+                    longitudeInput.value = parseFloat(location.lon).toFixed(6);
                 });
             });
         }
