@@ -1002,8 +1002,12 @@ void updateCenterDisplay() {
           int distMeters = (int)round(selectedLocationDistance * 1000.0);
           sprintf(buffer, "%d", distMeters); // Format as integer meters
           isMeters = true;
-      } else { // 500m or more
-          // Format distance in KM with 1 decimal place, increased width to 5
+      } else if (selectedLocationDistance >= 1000.0) { // Over 1000km, no decimal place
+          int distKm = (int)round(selectedLocationDistance);
+          sprintf(buffer, "%d", distKm); // Format as integer kilometers
+          isMeters = false;
+      } else { // Between 500m and 1000km
+          // Format distance in KM with 1 decimal place
           dtostrf(selectedLocationDistance, 5, 1, buffer); // e.g., 1.2, 12.3, 123.4
           isMeters = false;
       }
@@ -1678,7 +1682,7 @@ void prepareForSleep() {
 void setCustomCpuFrequencyMhz(uint32_t frequency) {
   esp_pm_config_esp32_t pm_config;
   pm_config.max_freq_mhz = frequency;
-  pm_config.min_freq_mhz = 240;
+  pm_config.min_freq_mhz = 40;
   pm_config.light_sleep_enable = false;
   esp_pm_configure(&pm_config);
 }

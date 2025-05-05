@@ -163,7 +163,6 @@
     <!-- Tab Navigation -->
     <div class="tab-navigation">
         <a href="#home" class="tab-link active" data-tab="home-content">Home</a>
-        <a href="store.html" class="tab-link">Store</a>
         <a href="#asselect" class="tab-link" data-tab="asselect-content">AS Select</a>
         <a href="#notam" class="tab-link" data-tab="notam-content">NOTAM</a>
         <a href="#docs" class="tab-link" data-tab="docs-content">Documentation</a>
@@ -281,14 +280,6 @@
         // Tab Navigation Logic
         document.querySelectorAll('.tab-link').forEach(tab => {
             tab.addEventListener('click', function(event) {
-                // Check if the tab is an external link (has no data-tab attribute)
-                const tabId = this.getAttribute('data-tab');
-                if (!tabId) {
-                    // This is an external link (like store.html), let the default navigation happen
-                    return;
-                }
-                
-                // For internal tabs, prevent default navigation
                 event.preventDefault();
                 
                 // Deactivate all tabs and contents
@@ -297,6 +288,7 @@
                 
                 // Activate the clicked tab and content
                 this.classList.add('active');
+                const tabId = this.getAttribute('data-tab');
                 document.getElementById(tabId).classList.add('active');
             });
         });
