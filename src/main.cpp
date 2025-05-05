@@ -36,6 +36,7 @@
 #define SERVICE_UUID           "7a41c6c2-e9cd-4136-9cbd-8a791086a566"
 #define LOCATION_CHAR_UUID     "98dcc5a5-d9fb-4fcc-be63-bf8a2eb4bcb4"
 #define RESPONSE_CHAR_UUID     "5bc4de8a-ed52-41a7-9e53-f8e927a0ee55"
+#define OPENAIP_CHAR_UUID     "3f9a1e2d-8c6b-4d3a-95f7-1a8b2c7d6e5f"
 
 #define BLE_TIMEOUT 120000    // 2 minutes (120,000 ms) timeout for BLE when not connected
 #define BLE_DISCONNECT_TIMEOUT 120000  // 2 minutes after disconnection
