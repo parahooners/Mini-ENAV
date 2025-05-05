@@ -37,6 +37,9 @@
 #define LOCATION_CHAR_UUID     "98dcc5a5-d9fb-4fcc-be63-bf8a2eb4bcb4"
 #define RESPONSE_CHAR_UUID     "5bc4de8a-ed52-41a7-9e53-f8e927a0ee55"
 
+#define BLE_TIMEOUT 120000    // 2 minutes (120,000 ms) timeout for BLE when not connected
+#define BLE_DISCONNECT_TIMEOUT 120000  // 2 minutes after disconnection
+
 #define SPI_SCK 14
 #define SPI_DIN 13
 #define EPD_CS 15
@@ -120,6 +123,14 @@ struct BLELocation {
 
 #define MAX_BLE_LOCATIONS 5
 BLELocation bleLocations[MAX_BLE_LOCATIONS];
+
+// BLE auto-shutdown variables
+unsigned long bleStartTime = 0;  // When BLE was last started or connected
+bool bleEnabled = true;  // Track if BLE is currently enabled
+
+// Forward declarations for BLE functions
+void enableBLE();
+void disableBLE();
 
 // Forward declarations
 void parseLocationData(std::string data);
@@ -240,6 +251,15 @@ int rotatingDotAngle = 0;
 unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 50; // 50ms debounce delay
 bool lastButtonState = HIGH; // Assume button is not pressed initially
+
+// --- Location cycling variables ---
+int currentSelectedIcon = 0; // 0 = Home, 1 = Takeoff, 2+ = BLE locations
+unsigned long lastIconChangeTime = 0;
+const unsigned long ICON_CYCLE_INTERVAL = 5000; // 5 seconds between icon changes
+bool hasMultipleLocations = false; // Flag to determine if we need to cycle
+double selectedLocationDistance = 0.0; // Distance of the currently selected location
+String selectedLocationLabel = ""; // Label of the currently selected location
+// --- End location cycling variables ---
 
 void setup() {
   // Reduce the CPU frequency to 40 MHz for lower power consumption
@@ -415,6 +435,52 @@ void setup() {
 
   // Initialize GPS waiting timeout
   gpsWaitStartTime = millis();
+}
+
+// Function to enable BLE
+void enableBLE() {
+  if (!bleEnabled) {
+    // Start BLE services
+    BLEDevice::init("Mini ENAV");
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+    pLocationCharacteristic = pService->createCharacteristic(
+      LOCATION_CHAR_UUID,
+      BLECharacteristic::PROPERTY_WRITE
+    );
+    pLocationCharacteristic->setCallbacks(new LocationCallbacks());
+
+    pResponseCharacteristic = pService->createCharacteristic(
+      RESPONSE_CHAR_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+    );
+    pResponseCharacteristic->addDescriptor(new BLE2902());
+
+    pService->start();
+    pServer->getAdvertising()->start();
+    
+    bleEnabled = true;
+    bleStartTime = millis(); // Reset the BLE timer
+  }
+}
+
+// Function to disable BLE
+void disableBLE() {
+  if (bleEnabled) {
+    // Stop BLE advertising and services
+    if (pServer) {
+      pServer->getAdvertising()->stop();
+    }
+    BLEDevice::deinit(true); // Complete shutdown of BLE
+    bleEnabled = false;
+    
+    // Quick vibration to indicate BLE has been turned off
+    digitalWrite(PIN_MOTOR, HIGH);
+    delay(50);
+    digitalWrite(PIN_MOTOR, LOW);
+  }
 }
 
 void parseLocationData(std::string data) {
@@ -734,6 +800,75 @@ void loop() {
   }
   wasFlying = flyingNow;
 
+  // --- BLE auto-shutdown logic ---
+  if (bleEnabled) {
+    // If we're connected, reset the timer
+    if (deviceConnected) {
+      bleStartTime = millis();
+    } 
+    // If we were connected but are now disconnected, check disconnection timeout
+    else if (oldDeviceConnected && !deviceConnected) {
+      if (millis() - bleStartTime > BLE_DISCONNECT_TIMEOUT) {
+        disableBLE();
+      }
+    }
+    // If we've never been connected, check initial timeout
+    else if (!deviceConnected && millis() - bleStartTime > BLE_TIMEOUT) {
+      disableBLE();
+    }
+  }
+  
+  // Handle reconnection if needed
+  if (!bleEnabled && digitalRead(PIN_KEY) == LOW) {
+    // Use button press to re-enable BLE
+    delay(50); // Debounce
+    if (digitalRead(PIN_KEY) == LOW) {
+      // Wait for 1 second for medium-length press
+      unsigned long pressStart = millis();
+      while (digitalRead(PIN_KEY) == LOW) {
+        if (millis() - pressStart > 1000) {
+          // Medium press (1-2 seconds)
+          enableBLE();
+          
+          // Show BLE enabled message
+          display.updateWindow(CENTER_X - INNER_RADIUS, CENTER_Y - INNER_RADIUS, 
+                             2 * INNER_RADIUS, 2 * INNER_RADIUS, true);
+          display.fillCircle(CENTER_X, CENTER_Y, INNER_RADIUS - 1, GxEPD_WHITE);
+          
+          display.setFont(&FreeMonoBold9pt7b);
+          display.setTextColor(GxEPD_BLACK);
+          
+          String message = "BLE";
+          int16_t tbx, tby; uint16_t tbw, tbh;
+          display.getTextBounds(message, 0, 0, &tbx, &tby, &tbw, &tbh);
+          display.setCursor(CENTER_X - tbw / 2, CENTER_Y - 5);
+          display.print(message);
+          
+          message = "ENABLED";
+          display.getTextBounds(message, 0, 0, &tbx, &tby, &tbw, &tbh);
+          display.setCursor(CENTER_X - tbw / 2, CENTER_Y + 15);
+          display.print(message);
+          
+          display.updateWindow(0, 0, 200, 200);
+          
+          // Vibrate to confirm
+          digitalWrite(PIN_MOTOR, HIGH);
+          delay(200);
+          digitalWrite(PIN_MOTOR, LOW);
+          
+          delay(1000);
+          updateCenterDisplay();
+          break;
+        }
+        delay(10);
+      }
+    }
+  }
+  // --- End BLE auto-shutdown logic ---
+  
+  // Remember old BLE connection state for next loop
+  oldDeviceConnected = deviceConnected;
+
   // Check for sleep timeout - This should run on every loop iteration
   // Ensure updateGPSData() has run to update isMoving and lastMovementTime
   if (!isMoving && millis() - lastMovementTime > SLEEP_TIMEOUT) {
@@ -863,13 +998,13 @@ void updateCenterDisplay() {
   } else { // Not waiting for GPS (includes waitingForTakeoff or navigating)
     if (homeSet) {
       char buffer[10];
-      if (distanceToHome < 0.5) { // Less than 500m
-          int distMeters = (int)round(distanceToHome * 1000.0);
+      if (selectedLocationDistance < 0.5) { // Less than 500m
+          int distMeters = (int)round(selectedLocationDistance * 1000.0);
           sprintf(buffer, "%d", distMeters); // Format as integer meters
           isMeters = true;
       } else { // 500m or more
           // Format distance in KM with 1 decimal place, increased width to 5
-          dtostrf(distanceToHome, 5, 1, buffer); // e.g., 1.2, 12.3, 123.4
+          dtostrf(selectedLocationDistance, 5, 1, buffer); // e.g., 1.2, 12.3, 123.4
           isMeters = false;
       }
       centerText = String(buffer);
@@ -909,6 +1044,23 @@ void updateCenterDisplay() {
       display.setCursor(textX, distY);
       display.setTextColor(GxEPD_BLACK);
       display.print(centerText);
+
+      // --- Display the location label (H, T, 1-5) above the distance ---
+      if (useDistanceFont && !waitingForGPS && selectedLocationLabel.length() > 0) {
+          // Show small text with the location label (e.g., "H", "T", "1", etc.)
+          display.setFont(&FreeMonoBold9pt7b);
+          String locText = "To " + selectedLocationLabel;
+          
+          int16_t ltbx, ltby; uint16_t ltbw, ltbh;
+          display.getTextBounds(locText, 0, 0, &ltbx, &ltby, &ltbw, &ltbh);
+          
+          // Position above the distance, centered
+          int locX = CENTER_X - ltbw / 2;
+          int locY = distY - tbh - 5; // Position above distance with 5px gap
+          
+          display.setCursor(locX, locY);
+          display.print(locText);
+      }
 
       // --- Add Speed Below Distance ---
       if (useDistanceFont) { // Only show speed if distance is shown (i.e., homeSet is true)
@@ -1012,16 +1164,17 @@ void updateTextArea(int x, int y, int w, int h, char* text, int textX, int textY
 
 void updateNavigationIndicators() {
   // --- Define collision detection variables ---
-  const int COLLISION_DISTANCE = 30; // Minimum pixel distance between icons
+  const int COLLISION_DISTANCE = 20; // Reduced from 30 to 20 pixels - allows icons to be closer together
   
   // Arrays to store calculated positions and visibility of indicators
   int iconX[MAX_BLE_LOCATIONS + 2] = {0}; // +2 for Home and Takeoff
   int iconY[MAX_BLE_LOCATIONS + 2] = {0};
   bool iconVisible[MAX_BLE_LOCATIONS + 2] = {false};
   String iconLabels[MAX_BLE_LOCATIONS + 2];
-  int iconIndexMap[MAX_BLE_LOCATIONS] = {-1}; // Map bleLocations index to iconX/Y index
+  double iconDistances[MAX_BLE_LOCATIONS + 2] = {0.0}; // Store distance to each icon
   
   int numIcons = 0;
+  int visibleIconCount = 0; // Count how many icons are visible
   
   // --- Home Indicator ---
   float relativeBearingHome = courseToHome - currentCourse;
@@ -1034,10 +1187,40 @@ void updateNavigationIndicators() {
   int iconRadiusHome = INNER_RADIUS + 16; // Fixed radius (was 15)
   iconX[numIcons] = CENTER_X + int(iconRadiusHome * sin(radiansHome));
   iconY[numIcons] = CENTER_Y - int(iconRadiusHome * cos(radiansHome));
+  
+  // Check if home icon is too close to center
+  if (abs(iconX[numIcons] - CENTER_X) < 5 && abs(iconY[numIcons] - CENTER_Y) < 5) {
+    // For North/South (0/180 degrees)
+    if (abs(sin(radiansHome)) < 0.1) {
+      // If cos is negative, it's toward South
+      if (cos(radiansHome) < 0) {
+        iconY[numIcons] = CENTER_Y + iconRadiusHome; // South
+      } else {
+        iconY[numIcons] = CENTER_Y - iconRadiusHome; // North
+      }
+    } 
+    // For East/West (90/270 degrees)
+    else if (abs(cos(radiansHome)) < 0.1) {
+      // If sin is positive, it's toward East
+      if (sin(radiansHome) > 0) {
+        iconX[numIcons] = CENTER_X + iconRadiusHome; // East
+      } else {
+        iconX[numIcons] = CENTER_X - iconRadiusHome; // West
+      }
+    }
+    // For any other direction, place icon on the ring at 45 degrees
+    else {
+      iconX[numIcons] = CENTER_X + int(iconRadiusHome * 0.7071); // sqrt(2)/2 = ~0.7071
+      iconY[numIcons] = CENTER_Y - int(iconRadiusHome * 0.7071);
+    }
+  }
+  
   iconVisible[numIcons] = true;  // Home is always visible
   iconLabels[numIcons] = "H";
+  iconDistances[numIcons] = distanceToHome;
   int homeIconIndex = numIcons;
   numIcons++;
+  visibleIconCount++;
 
   // --- Takeoff Indicator ---
   if (takeoffSet) {
@@ -1050,12 +1233,45 @@ void updateNavigationIndicators() {
     int iconRadiusTakeoff = INNER_RADIUS + 16; // Fixed radius
     iconX[numIcons] = CENTER_X + int(iconRadiusTakeoff * sin(radiansTakeoff));
     iconY[numIcons] = CENTER_Y - int(iconRadiusTakeoff * cos(radiansTakeoff));
+    
+    // Check if takeoff icon is too close to center
+    if (abs(iconX[numIcons] - CENTER_X) < 5 && abs(iconY[numIcons] - CENTER_Y) < 5) {
+      // For North/South (0/180 degrees)
+      if (abs(sin(radiansTakeoff)) < 0.1) {
+        // If cos is negative, it's toward South
+        if (cos(radiansTakeoff) < 0) {
+          iconY[numIcons] = CENTER_Y + iconRadiusTakeoff; // South
+        } else {
+          iconY[numIcons] = CENTER_Y - iconRadiusTakeoff; // North
+        }
+      } 
+      // For East/West (90/270 degrees)
+      else if (abs(cos(radiansTakeoff)) < 0.1) {
+        // If sin is positive, it's toward East
+        if (sin(radiansTakeoff) > 0) {
+          iconX[numIcons] = CENTER_X + iconRadiusTakeoff; // East
+        } else {
+          iconX[numIcons] = CENTER_X - iconRadiusTakeoff; // West
+        }
+      }
+      // For any other direction, place icon on the ring at 45 degrees
+      else {
+        iconX[numIcons] = CENTER_X + int(iconRadiusTakeoff * 0.7071);
+        iconY[numIcons] = CENTER_Y + int(iconRadiusTakeoff * 0.7071);
+      }
+    }
+    
     iconVisible[numIcons] = true;  // Takeoff is visible if set
     iconLabels[numIcons] = "T";
+    iconDistances[numIcons] = distanceToTakeoff;
+    int takeoffIconIndex = numIcons;
     numIcons++;
+    visibleIconCount++;
   }
   
   // --- BLE Location Indicators ---
+  int bleIconIndices[MAX_BLE_LOCATIONS];
+  
   for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
     if (bleLocations[i].name != "" && bleLocations[i].active) {
       // Calculate distance and bearing to the BLE location
@@ -1072,13 +1288,62 @@ void updateNavigationIndicators() {
       
       float radiansLocation = relativeBearingLocation * PI / 180.0;
       
-      // Calculate icon position
-      int iconRadiusLocation = INNER_RADIUS + 16; // Same as other icons
+      // Calculate icon position with fixed radius - ensures consistent distance from center
+      int iconRadiusLocation = INNER_RADIUS + 16; // Fixed radius, same as other icons
       iconX[numIcons] = CENTER_X + int(iconRadiusLocation * sin(radiansLocation));
       iconY[numIcons] = CENTER_Y - int(iconRadiusLocation * cos(radiansLocation));
+      
+      // Check if BLE location icon is too close to center
+      if (abs(iconX[numIcons] - CENTER_X) < 8 || abs(iconY[numIcons] - CENTER_Y) < 8) {
+        // For North/South (0/180 degrees) - use tighter check for angles
+        if (abs(sin(radiansLocation)) < 0.2) {
+          // If cos is negative, it's toward South
+          if (cos(radiansLocation) < 0) {
+            iconY[numIcons] = CENTER_Y + iconRadiusLocation; // South
+            iconX[numIcons] = CENTER_X; // Exactly at center X
+          } else {
+            iconY[numIcons] = CENTER_Y - iconRadiusLocation; // North
+            iconX[numIcons] = CENTER_X; // Exactly at center X
+          }
+        } 
+        // For East/West (90/270 degrees)
+        else if (abs(cos(radiansLocation)) < 0.2) {
+          // If sin is positive, it's toward East
+          if (sin(radiansLocation) > 0) {
+            iconX[numIcons] = CENTER_X + iconRadiusLocation; // East
+            iconY[numIcons] = CENTER_Y; // Exactly at center Y
+          } else {
+            iconX[numIcons] = CENTER_X - iconRadiusLocation; // West
+            iconY[numIcons] = CENTER_Y; // Exactly at center Y
+          }
+        }
+        // For directions around 45/135/225/315 degrees
+        else {
+          // Determine quadrant and place in appropriate 45-degree position
+          if (sin(radiansLocation) > 0 && cos(radiansLocation) > 0) {
+            // First quadrant (NE)
+            iconX[numIcons] = CENTER_X + int(iconRadiusLocation * 0.7071);
+            iconY[numIcons] = CENTER_Y - int(iconRadiusLocation * 0.7071);
+          } else if (sin(radiansLocation) > 0 && cos(radiansLocation) < 0) {
+            // Second quadrant (SE)
+            iconX[numIcons] = CENTER_X + int(iconRadiusLocation * 0.7071);
+            iconY[numIcons] = CENTER_Y + int(iconRadiusLocation * 0.7071);
+          } else if (sin(radiansLocation) < 0 && cos(radiansLocation) < 0) {
+            // Third quadrant (SW)
+            iconX[numIcons] = CENTER_X - int(iconRadiusLocation * 0.7071);
+            iconY[numIcons] = CENTER_Y + int(iconRadiusLocation * 0.7071);
+          } else {
+            // Fourth quadrant (NW)
+            iconX[numIcons] = CENTER_X - int(iconRadiusLocation * 0.7071);
+            iconY[numIcons] = CENTER_Y - int(iconRadiusLocation * 0.7071);
+          }
+        }
+      }
+      
       iconVisible[numIcons] = true;  // Initially assume it's visible
       iconLabels[numIcons] = bleLocations[i].name;
-      iconIndexMap[i] = numIcons; // Store the mapping between bleLocations index and icon index
+      iconDistances[numIcons] = distToLocation;
+      bleIconIndices[i] = numIcons;
       numIcons++;
     }
   }
@@ -1089,9 +1354,10 @@ void updateNavigationIndicators() {
   // Start from the BLE locations and check if they collide with Home or Takeoff
   for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
     if (bleLocations[i].name != "" && bleLocations[i].active) {
-      int iconIndex = iconIndexMap[i]; // Get the correct index in the icon arrays
+      int iconIndex = bleIconIndices[i];
       
-      if (iconIndex == -1) continue; // Skip if not mapped (shouldn't happen)
+      // Skip if this icon is already hidden for some reason
+      if (!iconVisible[iconIndex]) continue;
       
       // Check collision with Home
       int dx = iconX[iconIndex] - iconX[homeIconIndex];
@@ -1106,15 +1372,71 @@ void updateNavigationIndicators() {
       
       // Check collision with Takeoff if applicable
       if (takeoffSet) {
-        int takeoffIconIndex = homeIconIndex + 1;  // Assuming Takeoff is right after Home
-        dx = iconX[iconIndex] - iconX[takeoffIconIndex];
-        dy = iconY[iconIndex] - iconY[takeoffIconIndex];
+        int takeoffIndex = homeIconIndex + 1;  // Assuming Takeoff is right after Home
+        dx = iconX[iconIndex] - iconX[takeoffIndex];
+        dy = iconY[iconIndex] - iconY[takeoffIndex];
         distance = sqrt(dx*dx + dy*dy);
         
         if (distance < COLLISION_DISTANCE) {
           // Collision with Takeoff - Takeoff has priority
           iconVisible[iconIndex] = false;
+          continue;
         }
+      }
+      
+      // Check collision with other BLE locations (those processed so far)
+      for (int j = 0; j < i; j++) {
+        if (bleLocations[j].name != "" && bleLocations[j].active) {
+          int otherIndex = bleIconIndices[j];
+          
+          // Skip if the other icon is hidden
+          if (!iconVisible[otherIndex]) continue;
+          
+          dx = iconX[iconIndex] - iconX[otherIndex];
+          dy = iconY[iconIndex] - iconY[otherIndex];
+          distance = sqrt(dx*dx + dy*dy);
+          
+          if (distance < COLLISION_DISTANCE) {
+            // Collision with another BLE location
+            // Give priority to the lower-numbered location
+            if (i > j) {
+              iconVisible[iconIndex] = false;
+            } else {
+              iconVisible[otherIndex] = false;
+            }
+            break; // No need to check further for this icon
+          }
+        }
+      }
+      
+      // Increment the visible icon count if this one is visible
+      if (iconVisible[iconIndex]) {
+        visibleIconCount++;
+      }
+    }
+  }
+  
+  // --- Location cycling logic ---
+  hasMultipleLocations = (visibleIconCount > 1); // Enable cycling only if multiple locations are visible
+  
+  // Check if we need to cycle to next location icon
+  if (hasMultipleLocations && millis() - lastIconChangeTime > ICON_CYCLE_INTERVAL) {
+    lastIconChangeTime = millis();
+    
+    // Find the next visible icon
+    int initialSelectedIcon = currentSelectedIcon;
+    do {
+      currentSelectedIcon = (currentSelectedIcon + 1) % numIcons;
+      if (currentSelectedIcon == initialSelectedIcon) break; // Prevent infinite loop
+    } while (!iconVisible[currentSelectedIcon]);
+  }
+  
+  // If the current selected icon is not visible for some reason, select the first visible icon
+  if (!iconVisible[currentSelectedIcon] && numIcons > 0) {
+    for (int i = 0; i < numIcons; i++) {
+      if (iconVisible[i]) {
+        currentSelectedIcon = i;
+        break;
       }
     }
   }
@@ -1125,12 +1447,24 @@ void updateNavigationIndicators() {
   
   for (int i = 0; i < numIcons; i++) {
     if (iconVisible[i]) {
-      // Draw the icon
-      display.fillCircle(iconX[i], iconY[i], dotDrawRadius, GxEPD_BLACK);
+      // Final safety check - ensure no icon is drawn at the center
+      if (abs(iconX[i] - CENTER_X) < 4 && abs(iconY[i] - CENTER_Y) < 4) {
+        // We should never get here due to the earlier checks, but just in case
+        continue; // Skip this icon if it's at the center
+      }
+      
+      // Draw the icon - inverted if it's currently selected
+      if (i == currentSelectedIcon) {
+        // Draw inverted (white on black) for the selected icon
+        display.fillCircle(iconX[i], iconY[i], dotDrawRadius, GxEPD_BLACK);
+        display.setTextColor(GxEPD_WHITE);
+      } else {
+        // Draw normal (black on white) for non-selected icons
+        display.fillCircle(iconX[i], iconY[i], dotDrawRadius, GxEPD_BLACK);
+        display.setTextColor(GxEPD_WHITE);
+      }
       
       // Draw the label inside the dot
-      display.setTextColor(GxEPD_WHITE);
-      
       String labelChar = iconLabels[i];
       int16_t tbx, tby; uint16_t tbw, tbh;
       display.getTextBounds(labelChar, 0, 0, &tbx, &tby, &tbw, &tbh);
@@ -1141,6 +1475,17 @@ void updateNavigationIndicators() {
       display.setCursor(textX, textY);
       display.print(labelChar);
     }
+  }
+  
+  // Pass the selected location's distance to be displayed in the center
+  if (numIcons > 0 && iconVisible[currentSelectedIcon]) {
+    // Update the global selected distance variable for center display
+    selectedLocationDistance = iconDistances[currentSelectedIcon];
+    selectedLocationLabel = iconLabels[currentSelectedIcon];
+  } else {
+    // Default to home if no icons are visible
+    selectedLocationDistance = distanceToHome;
+    selectedLocationLabel = "H";
   }
 
   // Reset text color to black for other drawing elements

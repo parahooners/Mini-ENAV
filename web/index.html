@@ -22,11 +22,49 @@
             color: white;
             text-align: center;
             padding: 1rem;
-            margin-bottom: 20px;
+            margin-bottom: 0;
         }
         h1 {
             margin: 0;
         }
+        
+        /* Tab Navigation Styles */
+        .tab-navigation {
+            background-color: #444;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+        .tab-navigation a {
+            float: left;
+            display: block;
+            color: white;
+            text-align: center;
+            padding: 14px 16px;
+            text-decoration: none;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        .tab-navigation a:hover {
+            background-color: #555;
+        }
+        .tab-navigation a.active {
+            background-color: #4CAF50;
+        }
+        .tab-content {
+            display: none;
+            padding: 20px 0;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        iframe.external-site {
+            width: 100%;
+            height: 800px;
+            border: none;
+            overflow: hidden;
+        }
+        /* End Tab Navigation Styles */
+        
         .controls {
             display: flex;
             flex-wrap: wrap;
@@ -121,66 +159,148 @@
     <header>
         <h1>Mini ENAV Controller</h1>
     </header>
-    <div class="container">
-        <div class="controls">
-            <div class="control-panel">
-                <h2>Connection</h2>
-                <button id="connectBtn">Connect to Mini ENAV</button>
-                <button id="disconnectBtn" class="disconnect" disabled>Disconnect</button>
-                <div id="connectionStatus" class="status">Not connected</div>
-                
-                <h2>Location Management</h2>
-                <div class="flex-row">
-                    <div>
-                        <label for="locationName">Location ID:</label>
-                        <select id="locationName">
-                            <option value="1">1</option>
-                            <option value="2">2</option>
-                            <option value="3">3</option>
-                            <option value="4">4</option>
-                            <option value="5">5</option>
-                        </select>
+    
+    <!-- Tab Navigation -->
+    <div class="tab-navigation">
+        <a href="#home" class="tab-link active" data-tab="home-content">Home</a>
+        <a href="store.html" class="tab-link">Store</a>
+        <a href="#asselect" class="tab-link" data-tab="asselect-content">AS Select</a>
+        <a href="#notam" class="tab-link" data-tab="notam-content">NOTAM</a>
+        <a href="#docs" class="tab-link" data-tab="docs-content">Documentation</a>
+    </div>
+    
+    <!-- Tab Contents -->
+    <div id="home-content" class="tab-content active">
+        <div class="container">
+            <div class="controls">
+                <div class="control-panel">
+                    <h2>Connection</h2>
+                    <button id="connectBtn">Connect to Mini ENAV</button>
+                    <button id="disconnectBtn" class="disconnect" disabled>Disconnect</button>
+                    <div id="connectionStatus" class="status">Not connected</div>
+                    
+                    <h2>Location Management</h2>
+                    <div class="flex-row">
+                        <div>
+                            <label for="locationName">Location ID:</label>
+                            <select id="locationName">
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="4">4</option>
+                                <option value="5">5</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="locationStatus">Status:</label>
+                            <select id="locationStatus">
+                                <option value="ON">ON</option>
+                                <option value="OFF">OFF</option>
+                            </select>
+                        </div>
                     </div>
-                    <div>
-                        <label for="locationStatus">Status:</label>
-                        <select id="locationStatus">
-                            <option value="ON">ON</option>
-                            <option value="OFF">OFF</option>
-                        </select>
+                    
+                    <div class="flex-row">
+                        <div>
+                            <label for="latitude">Latitude:</label>
+                            <input type="number" id="latitude" step="0.000001" placeholder="Click on map">
+                        </div>
+                        <div>
+                            <label for="longitude">Longitude:</label>
+                            <input type="number" id="longitude" step="0.000001" placeholder="Click on map">
+                        </div>
                     </div>
+                    
+                    <button id="sendLocationBtn" disabled>Send Location</button>
+                    
+                    <h2>Saved Locations</h2>
+                    <div id="locationList"></div>
                 </div>
                 
-                <div class="flex-row">
-                    <div>
-                        <label for="latitude">Latitude:</label>
-                        <input type="number" id="latitude" step="0.000001" placeholder="Click on map">
-                    </div>
-                    <div>
-                        <label for="longitude">Longitude:</label>
-                        <input type="number" id="longitude" step="0.000001" placeholder="Click on map">
-                    </div>
+                <div class="control-panel">
+                    <h2>Serial Monitor</h2>
+                    <div id="serialMonitor"></div>
+                    <button id="clearMonitorBtn">Clear Monitor</button>
                 </div>
-                
-                <button id="sendLocationBtn" disabled>Send Location</button>
-                
-                <h2>Saved Locations</h2>
-                <div id="locationList"></div>
             </div>
             
-            <div class="control-panel">
-                <h2>Serial Monitor</h2>
-                <div id="serialMonitor"></div>
-                <button id="clearMonitorBtn">Clear Monitor</button>
+            <div class="map-container">
+                <div id="map"></div>
             </div>
         </div>
-        
-        <div class="map-container">
-            <div id="map"></div>
+    </div>
+    
+    <div id="asselect-content" class="tab-content">
+        <div class="container">
+            <h2>AS Select Aviation Tool</h2>
+            <div class="control-panel">
+                <p><strong>External Website Notice:</strong> The content below is embedded from <a href="https://asselect.uk/" target="_blank">asselect.uk</a>, an external website. This tool is owned and maintained by its respective authors and is not affiliated with Mini ENAV.</p>
+                <p>AS Select is a tool developed by <a href="https://asselect.uk/contact.html" target="_blank">Phil Haeberli</a> to assist pilots with aviation-related calculations and airspace information. All rights and credit for this tool belong to its original creators.</p>
+                <p>For any issues with the AS Select tool itself, please contact the website owners directly through their official website.</p>
+            </div>
+            <iframe src="https://asselect.uk/" class="external-site" title="AS Select"></iframe>
+        </div>
+    </div>
+    
+    <div id="notam-content" class="tab-content">
+        <div class="container">
+            <h2>NOTAM Information</h2>
+            <div class="control-panel">
+                <p><strong>External Website Notice:</strong> The content below is embedded from <a href="https://notaminfo.com/ukmap" target="_blank">notaminfo.com/ukmap</a>, an external website. This tool is owned and maintained by its respective authors and is not affiliated with Mini ENAV.</p>
+                <p>NOTAM Info is a service that provides Notice to Air Missions (NOTAM) information for pilots and aviation personnel. All rights and credit for this tool belong to its original creators.</p>
+                <p>For any issues with the NOTAM Info tool itself, please contact the website owners directly through their official website.</p>
+            </div>
+            <iframe src="https://notaminfo.com/ukmap" class="external-site" title="NOTAM Info UK Map"></iframe>
+        </div>
+    </div>
+    
+    <div id="docs-content" class="tab-content">
+        <div class="container">
+            <h2>Mini ENAV Documentation</h2>
+            <p>Documentation and help resources for the Mini ENAV system.</p>
+            <div class="control-panel">
+                <h3>Getting Started</h3>
+                <p>Welcome to the Mini ENAV Controller documentation. This section will contain guides and resources to help you use your Mini ENAV device effectively.</p>
+                
+                <h3>Features</h3>
+                <ul>
+                    <li>GPS Navigation</li>
+                    <li>Bluetooth Connectivity</li>
+                    <li>Location Management</li>
+                    <li>Low Power Consumption</li>
+                </ul>
+                
+                <h3>Troubleshooting</h3>
+                <p>Common issues and their solutions will be listed here.</p>
+            </div>
         </div>
     </div>
     
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
+        // Tab Navigation Logic
+        document.querySelectorAll('.tab-link').forEach(tab => {
+            tab.addEventListener('click', function(event) {
+                // Check if the tab is an external link (has no data-tab attribute)
+                const tabId = this.getAttribute('data-tab');
+                if (!tabId) {
+                    // This is an external link (like store.html), let the default navigation happen
+                    return;
+                }
+                
+                // For internal tabs, prevent default navigation
+                event.preventDefault();
+                
+                // Deactivate all tabs and contents
+                document.querySelectorAll('.tab-link').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                
+                // Activate the clicked tab and content
+                this.classList.add('active');
+                document.getElementById(tabId).classList.add('active');
+            });
+        });
+        
         // BLE UUIDs
         const ENAV_SERVICE_UUID = "7a41c6c2-e9cd-4136-9cbd-8a791086a566";
         const LOCATION_CHAR_UUID = "98dcc5a5-d9fb-4fcc-be63-bf8a2eb4bcb4";
