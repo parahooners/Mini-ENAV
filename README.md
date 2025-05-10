@@ -23,13 +23,17 @@ This project turns a nifty little LilyGO E-Paper Watch into a minimalist navigat
 ## Features
 
 - **Navigation Indicators**:
-  - Displays distance and heading to a home point or takeoff point.
+  - Displays distance and heading to a home point, takeoff point, or any active waypoint/location.
   - Updates dynamically based on GPS data.
-  - Support for up to 5 custom Points of Interest (POIs) that can be saved and tracked.
+  - Support for up to 20 waypoints and 5 regular locations, all managed via BLE and the web interface.
+  - Cycles through navigation targets (Home, Takeoff, Waypoints, Locations) on the device.
+- **Navigation Modes**:
+  - Three navigation modes: Off, Location, and Waypoint, selectable via device settings or web interface.
 - **Bluetooth LE Connectivity**:
-  - Connect with a web interface through your phone's browser to manage waypoints.
-  - Save, activate, and deactivate custom locations remotely.
-  - View all saved locations when connecting to the device.
+  - Connect with the web interface (see badge/link above) through your phone or computer browser to manage waypoints and locations.
+  - Save, activate, and deactivate custom locations and waypoints remotely.
+  - View all saved locations and waypoints when connecting to the device.
+  - BLE auto-shutdown after inactivity, re-enabled by button press.
 - **Fuel Tracking**:
   - Tracks remaining fuel in liters.
   - Displays estimated flight time based on fuel burn rate.
@@ -41,11 +45,18 @@ This project turns a nifty little LilyGO E-Paper Watch into a minimalist navigat
     - **Fuel quantity**: Set the current fuel level in liters.
     - **Fuel burn rate**: Adjust the fuel consumption rate in liters per hour.
     - **Fuel display visibility**: Toggle the visibility of the fuel display.
+    - **Navigation mode**: Select Off, Location, or Waypoint mode.
   - Displays **estimated flight time** based on the current fuel and burn rate.
+- **Takeoff Point Logic**:
+  - Takeoff point is set automatically when moving >500m from Home.
 - **Energy Efficiency**:
   - CPU frequency reduced to **40 MHz** to maximize power efficiency.
   - E-paper display refresh rate optimized to 0.8 seconds.
-  - Deep sleep mode implemented for inactivity.
+  - Deep sleep mode implemented for inactivity or long button press.
+- **Improved UI**:
+  - Rotating dot animation while waiting for GPS.
+  - Compass rose, battery, satellite, and fuel indicators.
+  - Partial display refreshes for efficiency.
 - **Haptic Feedback**:
   - Vibration motor for tactile feedback during key actions.
 
@@ -129,6 +140,7 @@ The settings page is accessible only within the first 10 seconds after the unit 
 - Adjust the starting fuel litres (increments by 0.5).
 - Adjust the fuel burn rate (increments by 0.1).
 - Toggle the visibility of the Jerry Can and fuel litres display on the main navigation and GPS wait screens.
+- Select navigation mode (Off, Location, Waypoint).
 
 To change a value, press the button while the selection box is on the desired setting. After 5 seconds of inactivity, the selection box moves to the next setting. When all settings are configured, the values are saved to EEPROM and the unit restarts.
 
@@ -136,53 +148,54 @@ To change a value, press the button while the selection box is on the desired se
 
 ## Web Interface (Bluetooth LE)
 
-The Mini ENAV now includes Bluetooth LE connectivity with a web interface for managing waypoints:
+The Mini ENAV now includes Bluetooth LE connectivity with a web interface for managing waypoints and locations:
 
 1. **Accessing the Web Interface:**
    - Use a Web Bluetooth compatible browser (Chrome, Edge, or Opera on Android/Windows/Mac)
-   - Open the `web/index.html` file locally or host it on a website
+   - Visit the [Live Web Interface](https://parahooners.github.io/Mini-ENAV/) (recommended) or open the `docs/index.html` file locally
    - Click "Connect to Mini ENAV" to establish a connection
 
-2. **Managing Waypoints:**
-   - **View Saved Locations:** When connected, all saved waypoints are displayed automatically
-   - **Add/Update Waypoint:**
-     - Select a location number (1-5)
+2. **Managing Waypoints and Locations:**
+   - **View Saved Locations/Waypoints:** When connected, all saved waypoints and locations are displayed automatically
+   - **Add/Update Waypoint or Location:**
+     - Select a location or waypoint number
      - Set status (ON/OFF)
      - Enter coordinates manually or click on the map
      - Click "Send Location"
-   - **Modify Waypoint:** Click "Load" on an existing waypoint to edit it
+   - **Modify Waypoint/Location:** Click "Load" on an existing entry to edit it
+   - **Switch Navigation Modes:** Use the web interface to change between Off, Location, and Waypoint navigation modes
 
 3. **Navigation Interface:**
-   - The map displays all active waypoints
-   - Each waypoint appears as a numbered marker
-   - The device shows directions to active waypoints on the display
+   - The map displays all active waypoints and locations
+   - Each appears as a numbered marker
+   - The device cycles through and shows directions to active targets on the display
 
 4. **Notes:**
-   - The web interface works best on mobile phones for on-the-go waypoint management
-   - Waypoints persist through device reboots and power cycles
-   - A maximum of 5 custom waypoints can be stored
+   - The web interface works best on mobile phones for on-the-go management
+   - Waypoints and locations persist through device reboots and power cycles
+   - Up to 20 waypoints and 5 locations can be stored
+   - BLE will auto-disable after 2 minutes of inactivity or disconnect; press the device button to re-enable
 
 ---
 
 ## Recent Updates
 
+### May 2025 Updates
+
+- Expanded BLE support: Now supports up to 20 waypoints and 5 locations, all managed via the web interface
+- Added navigation modes (Off, Location, Waypoint) and cycling through navigation targets
+- Improved settings screen: Now includes navigation mode selection and better persistence
+- Takeoff point logic: Automatically sets takeoff point when moving >500m from Home
+- Flight hours tracking: Tracks and displays total flight hours, saved in EEPROM
+- BLE auto-shutdown and re-enable logic
+- Improved UI: Rotating dot animation, compass rose, battery, satellite, and fuel indicators, partial refreshes
+- Power management: Deep sleep after inactivity or long button press, lower CPU frequency
+
 ### April 2025 Updates
 
-### 1. **Bluetooth LE Integration**
 - Added Bluetooth LE connectivity for managing waypoints via a web interface
 - Implemented a web-based interface for saving, viewing and managing waypoints
 - Added support for up to 5 custom Points of Interest that appear on the navigation display
-
-### 2. **Improved Home Point Management**
-- Enhanced GPS validation when setting home points to prevent erroneous coordinates
-- Added safeguards against sudden jumps in home position due to GPS errors
-- Implemented proper separation between home point and custom waypoints
-- Better visual feedback when setting home points, including error messages for unreliable GPS data
-
-### 3. **Better Collision Detection for Navigation Indicators**
-- Implemented priority-based rendering of navigation indicators
-- Prevented overlap between home point, takeoff point, and custom waypoints
-- Ensured that critical indicators (home, takeoff) always remain visible
 
 ### Previous Updates
 
