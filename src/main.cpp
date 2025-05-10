@@ -36,7 +36,6 @@
 #define SERVICE_UUID           "7a41c6c2-e9cd-4136-9cbd-8a791086a566"
 #define LOCATION_CHAR_UUID     "98dcc5a5-d9fb-4fcc-be63-bf8a2eb4bcb4"
 #define RESPONSE_CHAR_UUID     "5bc4de8a-ed52-41a7-9e53-f8e927a0ee55"
-#define OPENAIP_CHAR_UUID     "3f9a1e2d-8c6b-4d3a-95f7-1a8b2c7d6e5f"
 
 #define BLE_TIMEOUT 120000    // 2 minutes (120,000 ms) timeout for BLE when not connected
 #define BLE_DISCONNECT_TIMEOUT 120000  // 2 minutes after disconnection
@@ -317,14 +316,6 @@ void setup() {
 
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
-  
-  // Uncomment this block to clear EEPROM, then comment it again after running once!
-  /*
-  for (int i = 0; i < EEPROM_SIZE; ++i) {
-      EEPROM.write(i, 0);
-  }
-  EEPROM.commit();
-  */
 
   // Load home position from EEPROM
   EEPROM.get(HOME_LAT_ADDR, homeLat);
@@ -990,30 +981,28 @@ void updateGPSData() {
 
 void updateCenterDisplay() {
   String centerText = "";
-  bool useDistanceFont = false; // Flag to indicate which font to use
-  bool isMeters = false; // Flag to track if distance is in meters
+  bool useDistanceFont = false;
+  bool isMeters = false;
 
   if (waitingForGPS) {
     centerText = "Wait GPS";
     display.setFont(&FreeMonoBold9pt7b);
-  } else { // Not waiting for GPS (includes waitingForTakeoff or navigating)
+  } else {
     if (homeSet) {
       char buffer[10];
-      if (selectedLocationDistance < 0.5) { // Less than 500m
+      if (selectedLocationDistance < 0.5) {
           int distMeters = (int)round(selectedLocationDistance * 1000.0);
-          sprintf(buffer, "%d", distMeters); // Format as integer meters
+          sprintf(buffer, "%d", distMeters);
           isMeters = true;
-      } else if (selectedLocationDistance >= 1000.0) { // Over 1000km, no decimal place
+      } else if (selectedLocationDistance >= 1000.0) {
           int distKm = (int)round(selectedLocationDistance);
-          sprintf(buffer, "%d", distKm); // Format as integer kilometers
+          sprintf(buffer, "%d", distKm);
           isMeters = false;
-      } else { // Between 500m and 1000km
-          // Format distance in KM with 1 decimal place
-          dtostrf(selectedLocationDistance, 5, 1, buffer); // e.g., 1.2, 12.3, 123.4
+      } else {
+          dtostrf(selectedLocationDistance, 5, 1, buffer);
           isMeters = false;
       }
       centerText = String(buffer);
-      // Use the Tahoma 20pt font for distance/meters
       display.setFont(&tahoma20pt7b);
       useDistanceFont = true;
     } else {
@@ -1024,74 +1013,58 @@ void updateCenterDisplay() {
 
   if (centerText.length() > 0) {
       int16_t tbx, tby; uint16_t tbw, tbh;
-      // Ensure the correct font is set before getting bounds
       if (useDistanceFont) display.setFont(&tahoma20pt7b);
       else display.setFont(&FreeMonoBold9pt7b);
       display.getTextBounds(centerText, 0, 0, &tbx, &tby, &tbw, &tbh);
 
       int textX;
-      // Center vertically based on font height, shift up for distance
-      int distY = CENTER_Y + tbh / 2 - 15; // Shifted up 15px
+      int distY = CENTER_Y + tbh / 2 - 15;
 
-      // If using the distance font, displaying KM (not meters), and the text contains a decimal point, center on the decimal
       int decimalPos = centerText.indexOf('.');
       if (useDistanceFont && !isMeters && decimalPos != -1) {
           String beforeDecimal = centerText.substring(0, decimalPos);
           int16_t btbx, btby; uint16_t btw, bth;
           display.getTextBounds(beforeDecimal, 0, 0, &btbx, &btby, &btw, &bth);
-          textX = CENTER_X - btw; // Align decimal point near center
+          textX = CENTER_X - btw;
       } else {
-          // Default centering for distance (meters) or other text
           textX = CENTER_X - tbw / 2;
       }
 
-      // --- Print Distance (or Meters) ---
       display.setCursor(textX, distY);
       display.setTextColor(GxEPD_BLACK);
       display.print(centerText);
 
-      // --- Display the location label (H, T, 1-5) above the distance ---
       if (useDistanceFont && !waitingForGPS && selectedLocationLabel.length() > 0) {
-          // Show small text with the location label (e.g., "H", "T", "1", etc.)
           display.setFont(&FreeMonoBold9pt7b);
           String locText = "To " + selectedLocationLabel;
           
           int16_t ltbx, ltby; uint16_t ltbw, ltbh;
           display.getTextBounds(locText, 0, 0, &ltbx, &ltby, &ltbw, &ltbh);
           
-          // Position above the distance, centered
           int locX = CENTER_X - ltbw / 2;
-          int locY = distY - tbh - 5; // Position above distance with 5px gap
+          int locY = distY - tbh - 5;
           
           display.setCursor(locX, locY);
           display.print(locText);
       }
 
-      // --- Add Speed Below Distance ---
-      if (useDistanceFont) { // Only show speed if distance is shown (i.e., homeSet is true)
+      if (useDistanceFont) {
           char speedBuffer[10];
-          int speedInt = (int)round(gps.speed.kmph()); // Get speed as integer KM/H
+          int speedInt = (int)round(gps.speed.kmph());
           sprintf(speedBuffer, "%d", speedInt);
           String speedText = String(speedBuffer);
 
-          // Use the same font for speed
           display.setFont(&tahoma20pt7b);
           int16_t stbx, stby; uint16_t stbw, stbh;
           display.getTextBounds(speedText, 0, 0, &stbx, &stby, &stbw, &stbh);
 
-          // Center speed horizontally
           int speedX = CENTER_X - stbw / 2;
-          // Position speed below distance text (distY is the baseline of distance)
-          // Adjusted Y: Add 10 more pixels down (original +5, now +15)
-          int speedY = distY + tbh + 15; // Add height of distance text + 15px padding
+          int speedY = distY + tbh + 15;
 
           display.setCursor(speedX, speedY);
           display.print(speedText);
       }
 
-  } else {
-      // Optionally clear the center if needed
-      // display.fillCircle(CENTER_X, CENTER_Y, INNER_RADIUS - 1, GxEPD_WHITE);
   }
 }
 
@@ -1454,20 +1427,12 @@ void updateNavigationIndicators() {
     if (iconVisible[i]) {
       // Final safety check - ensure no icon is drawn at the center
       if (abs(iconX[i] - CENTER_X) < 4 && abs(iconY[i] - CENTER_Y) < 4) {
-        // We should never get here due to the earlier checks, but just in case
         continue; // Skip this icon if it's at the center
       }
       
-      // Draw the icon - inverted if it's currently selected
-      if (i == currentSelectedIcon) {
-        // Draw inverted (white on black) for the selected icon
-        display.fillCircle(iconX[i], iconY[i], dotDrawRadius, GxEPD_BLACK);
-        display.setTextColor(GxEPD_WHITE);
-      } else {
-        // Draw normal (black on white) for non-selected icons
-        display.fillCircle(iconX[i], iconY[i], dotDrawRadius, GxEPD_BLACK);
-        display.setTextColor(GxEPD_WHITE);
-      }
+      // Draw the icon - always black circle with white text
+      display.fillCircle(iconX[i], iconY[i], dotDrawRadius, GxEPD_BLACK);
+      display.setTextColor(GxEPD_WHITE);
       
       // Draw the label inside the dot
       String labelChar = iconLabels[i];
