@@ -139,7 +139,7 @@ bool navigationEnabled = true;
 #define ADC_REFERENCE 3.3
 #define BAT_VOLTAGE_DIVIDER 2.0
 #define BAT_MIN_VOLTAGE 3.0
-#define BAT_MAX_VOLTAGE 3.9 // Adjusted from 3.7 to 3.9 for full charge
+#define BAT_MAX_VOLTAGE 3.8 // Adjusted from 3.9 to 3.8 for full charge
 
 // Global variables
 GxIO_Class io(SPI, /*CS*/ EPD_CS, /*DC=*/EPD_DC, /*RST=*/EPD_RESET);
