@@ -10,7 +10,7 @@
 #include <SPI.h>
 #include <Wire.h>
 #include "esp_pm.h"
-#include "tahoma20pt7b.h" // Include the new font file
+#include "tahoma20pt7b.h" // Include the new font file 
 #include "tahoma15pt7b.h" // Include the 15pt font file
 #include "tahoma10pt7b.h" // Include the 10pt font file
 #include <math.h> // Add this include for isnan()
