@@ -64,7 +64,7 @@
 #define GPS_WAIT_TIMEOUT 600000 // 10 minutes in milliseconds
 
 // EEPROM addresses (no overlap!)
-#define EEPROM_SIZE 120 // Increased to properly store all 5 BLE locations
+#define EEPROM_SIZE 512 // Increased to store 20 locations (20 * 17 bytes each) + other data
 #define HOME_LAT_ADDR 0              // double, 8 bytes
 #define HOME_LON_ADDR 8              // double, 8 bytes
 #define FUEL_LITRES_ADDR 16          // float, 4 bytes
@@ -87,6 +87,47 @@
 #define BLE_LOC5_LON_ADDR 105        // double, 8 bytes
 #define BLE_LOC5_ACTIVE_ADDR 113     // uint8_t, 1 byte
 
+// New waypoint mode configuration
+#define WAYPOINT_MODE_ADDR 114        // uint8_t, 1 byte
+#define CURRENT_WAYPOINT_ADDR 115     // uint8_t, 1 byte
+
+// Additional BLE location addresses (continue pattern)
+#define BLE_LOC6_LAT_ADDR 116
+#define BLE_LOC6_LON_ADDR 124
+#define BLE_LOC6_ACTIVE_ADDR 132
+// ... Continue pattern for locations 7-20
+#define BLE_LOC20_LAT_ADDR 368
+#define BLE_LOC20_LON_ADDR 376
+#define BLE_LOC20_ACTIVE_ADDR 384
+
+#define MAX_LOCATION_POINTS 5
+#define MAX_WAYPOINTS 20
+
+// Regular location points storage
+struct LocationPoint {
+  String name;
+  double lat;
+  double lon;
+  bool active;
+};
+
+// EEPROM addresses for location points
+#define LOCATION_POINTS_START 385  // After waypoint addresses
+#define LOCATION_MODE_ADDR 485    // After location points storage
+#define LOCATION_POINT_SIZE 17    // Same size as waypoints (8 + 8 + 1)
+
+// Navigation mode options
+enum NavigationMode {
+  NAV_OFF,
+  NAV_LOCATION,
+  NAV_WAYPOINT
+};
+
+// Global variables for navigation
+LocationPoint locationPoints[MAX_LOCATION_POINTS];
+NavigationMode currentNavMode = NAV_LOCATION; // Default to location mode
+bool navigationEnabled = true;
+
 // Change detection thresholds
 #define SPEED_CHANGE_THRESHOLD 1.0     // km/h
 #define ALT_CHANGE_THRESHOLD 5.0      // feet
@@ -106,6 +147,11 @@ GxEPD_Class display(io, /*RST=*/EPD_RESET, /*BUSY=*/EPD_BUSY);
 TinyGPSPlus gps;
 HardwareSerial GPSSerial(1);
 
+// Waypoint mode variables
+bool waypointMode = false;
+uint8_t currentWaypoint = 0;
+const float WAYPOINT_REACHED_DISTANCE = 0.2; // 200 meters in km
+
 // BLE definitions
 BLEServer *pServer = NULL;
 BLECharacteristic *pLocationCharacteristic = NULL;
@@ -121,7 +167,7 @@ struct BLELocation {
   bool active;
 };
 
-#define MAX_BLE_LOCATIONS 5
+#define MAX_BLE_LOCATIONS 20
 BLELocation bleLocations[MAX_BLE_LOCATIONS];
 
 // BLE auto-shutdown variables
@@ -182,6 +228,7 @@ void drawSatelliteIcon(int x, int y, int size);
 void drawJerryCan(int x, int y, int width, int height);
 void enterSettingsScreen();
 void drawCompassRose(int cx, int cy, int radius, float headingDegrees);
+double calculateRemainingRouteDistance(int startWaypoint);
 
 double homeLat = 0.0;
 double homeLon = 0.0;
@@ -198,13 +245,21 @@ double distanceToHome = 0.0;
 double courseToHome = 0.0;
 double currentCourse = 0.0;
 
+// --- Location cycling variables ---
+int currentSelectedIcon = 0; // 0 = Home, 1 = Takeoff, 2+ = BLE locations
+unsigned long lastIconChangeTime = 0;
+const unsigned long ICON_CYCLE_INTERVAL = 5000; // 5 seconds between icon changes
+bool hasMultipleLocations = false; // Flag to determine if we need to cycle
+double selectedLocationDistance = 0.0; // Distance of the currently selected location
+String selectedLocationLabel = ""; // Label of the currently selected location
+// --- End location cycling variables ---
+
 // --- New Takeoff Point Variables ---
 double takeoffLat = 0.0;
 double takeoffLon = 0.0;
 bool takeoffSet = false;
 double distanceToTakeoff = 0.0;
 double courseToTakeoff = 0.0;
-bool initialFixProcessed = false; // Flag to process takeoff point only once
 // --- End New Takeoff Point Variables ---
 
 // Fuel variables
@@ -251,15 +306,6 @@ int rotatingDotAngle = 0;
 unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 50; // 50ms debounce delay
 bool lastButtonState = HIGH; // Assume button is not pressed initially
-
-// --- Location cycling variables ---
-int currentSelectedIcon = 0; // 0 = Home, 1 = Takeoff, 2+ = BLE locations
-unsigned long lastIconChangeTime = 0;
-const unsigned long ICON_CYCLE_INTERVAL = 5000; // 5 seconds between icon changes
-bool hasMultipleLocations = false; // Flag to determine if we need to cycle
-double selectedLocationDistance = 0.0; // Distance of the currently selected location
-String selectedLocationLabel = ""; // Label of the currently selected location
-// --- End location cycling variables ---
 
 void setup() {
   // Reduce the CPU frequency to 40 MHz for lower power consumption
@@ -401,6 +447,49 @@ void setup() {
     bleLocations[4].active = (tempActive != 0);
   }
 
+  // Load waypoints from EEPROM (locations 6-20)
+  for (int i = 5; i < MAX_WAYPOINTS; i++) {
+    int baseAddr = BLE_LOC6_LAT_ADDR + ((i - 5) * 17); // 17 bytes per location
+    double tempLat, tempLon;
+    uint8_t tempActive;
+    
+    EEPROM.get(baseAddr, tempLat);
+    EEPROM.get(baseAddr + 8, tempLon);
+    EEPROM.get(baseAddr + 16, tempActive);
+    
+    if (tempLat != 0.0 || tempLon != 0.0) {
+      bleLocations[i].name = "W" + String(i + 1);
+      bleLocations[i].lat = tempLat;
+      bleLocations[i].lon = tempLon;
+      bleLocations[i].active = (tempActive != 0);
+    }
+  }
+
+  // Load navigation mode from EEPROM
+  uint8_t navMode;
+  EEPROM.get(LOCATION_MODE_ADDR, navMode);
+  currentNavMode = (NavigationMode)navMode;
+  if (currentNavMode > NAV_WAYPOINT) currentNavMode = NAV_LOCATION;
+
+  // Load location points from EEPROM
+  for (int i = 0; i < MAX_LOCATION_POINTS; i++) {
+    locationPoints[i].name = "L" + String(i + 1);
+    int addr = LOCATION_POINTS_START + (i * LOCATION_POINT_SIZE);
+    
+    double tempLat, tempLon;
+    uint8_t tempActive;
+    
+    EEPROM.get(addr, tempLat);
+    EEPROM.get(addr + 8, tempLon);
+    EEPROM.get(addr + 16, tempActive);
+    
+    if (tempLat != 0.0 || tempLon != 0.0) {
+      locationPoints[i].lat = tempLat;
+      locationPoints[i].lon = tempLon;
+      locationPoints[i].active = (tempActive != 0);
+    }
+  }
+
   // Initialize display with optimized settings
   display.init(0); // false = partial updates possible
   display.setRotation(0);
@@ -478,38 +567,96 @@ void disableBLE() {
 void parseLocationData(std::string data) {
   String dataStr = String(data.c_str());
   
+  // Handle navigation mode commands
+  if (dataStr == "NAVIGATION_MODE_WAYPOINT") {
+    currentNavMode = NAV_WAYPOINT;
+    navigationEnabled = true;
+    EEPROM.put(LOCATION_MODE_ADDR, (uint8_t)NAV_WAYPOINT);
+    EEPROM.commit();
+    pResponseCharacteristic->setValue("Waypoint mode enabled");
+    pResponseCharacteristic->notify();
+    // Vibration feedback
+    digitalWrite(PIN_MOTOR, HIGH);
+    delay(200);
+    digitalWrite(PIN_MOTOR, LOW);
+    return;
+  }
+  
+  if (dataStr == "NAVIGATION_MODE_LOCATION") {
+    currentNavMode = NAV_LOCATION;
+    navigationEnabled = true;
+    EEPROM.put(LOCATION_MODE_ADDR, (uint8_t)NAV_LOCATION);
+    EEPROM.commit();
+    pResponseCharacteristic->setValue("Location mode enabled");
+    pResponseCharacteristic->notify();
+    // Vibration feedback
+    digitalWrite(PIN_MOTOR, HIGH);
+    delay(200);
+    digitalWrite(PIN_MOTOR, LOW);
+    return;
+  }
+  
+  if (dataStr == "NAVIGATION_MODE_OFF") {
+    navigationEnabled = false;
+    EEPROM.put(LOCATION_MODE_ADDR, (uint8_t)NAV_OFF);
+    EEPROM.commit();
+    pResponseCharacteristic->setValue("Navigation disabled");
+    pResponseCharacteristic->notify();
+    // Vibration feedback
+    digitalWrite(PIN_MOTOR, HIGH);
+    delay(200);
+    digitalWrite(PIN_MOTOR, LOW);
+    return;
+  }
+
   // Check if this is a request to get current locations
   if (dataStr == "GET_LOCATIONS") {
-    // Send all saved locations back to the client
-    for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
-      if (bleLocations[i].name != "") {
-        // Create a buffer with precise formatting control
+    // Send regular locations first
+    for (int i = 0; i < MAX_LOCATION_POINTS; i++) {
+      if (locationPoints[i].name != "") {
         char jsonBuffer[100];
-        // Format the JSON data separately to ensure no formatting issues with negative numbers
         snprintf(jsonBuffer, sizeof(jsonBuffer), 
-                 "{\"name\":\"%s\",\"lat\":%.6f,\"lon\":%.6f,\"active\":%s}", 
-                 bleLocations[i].name.c_str(), 
+                 "{\"type\":\"location\",\"name\":\"L%d\",\"lat\":%.6f,\"lon\":%.6f,\"active\":%s}", 
+                 i + 1,
+                 locationPoints[i].lat, 
+                 locationPoints[i].lon, 
+                 locationPoints[i].active ? "true" : "false");
+        
+        char locData[200];
+        sprintf(locData, "LOC_DATA:%s", jsonBuffer);
+        pResponseCharacteristic->setValue(locData);
+        pResponseCharacteristic->notify();
+        delay(100);
+      }
+    }
+    // Then send waypoints
+    for (int i = 0; i < MAX_WAYPOINTS; i++) {
+      if (bleLocations[i].name != "") {
+        char jsonBuffer[100];
+        snprintf(jsonBuffer, sizeof(jsonBuffer), 
+                 "{\"type\":\"waypoint\",\"name\":\"W%d\",\"lat\":%.6f,\"lon\":%.6f,\"active\":%s}", 
+                 i + 1,
                  bleLocations[i].lat, 
                  bleLocations[i].lon, 
                  bleLocations[i].active ? "true" : "false");
-                 
-        // Then add the prefix separately
+        
         char locData[200];
         sprintf(locData, "LOC_DATA:%s", jsonBuffer);
-        
         pResponseCharacteristic->setValue(locData);
         pResponseCharacteristic->notify();
-        delay(200); // Small delay between location notifications
+        delay(100);
       }
     }
     return;
   }
+
+  // Expected format: "type-Name-Lat-Lon-ON/OFF"
+  String type = dataStr.substring(0, dataStr.indexOf('-'));
+  dataStr = dataStr.substring(dataStr.indexOf('-') + 1);
   
-  // Expected format: "Name-Lat-Lon-ON" or "Name-Lat-Lon-OFF"
-  // Modified parsing to handle negative coordinates correctly
   int firstDash = dataStr.indexOf('-');
   if (firstDash == -1) {
-    pResponseCharacteristic->setValue("Invalid format. Use Name-Lat-Lon-ON/OFF");
+    pResponseCharacteristic->setValue("Invalid format. Use Type-Name-Lat-Lon-ON/OFF");
     pResponseCharacteristic->notify();
     return;
   }
@@ -528,10 +675,8 @@ void parseLocationData(std::string data) {
     return;
   }
   
-  // Get the status string
   String activeStr = dataStr.substring(statusPos + 1);
   
-  // Now find the separator between lat and lon by searching backwards from statusPos
   int lastDash = dataStr.lastIndexOf('-', statusPos - 1);
   if (lastDash == -1 || lastDash <= firstDash) {
     pResponseCharacteristic->setValue("Invalid format. Could not parse coordinates");
@@ -539,106 +684,75 @@ void parseLocationData(std::string data) {
     return;
   }
   
-  // Extract lat and lon
   String latStr = dataStr.substring(firstDash + 1, lastDash);
   String lonStr = dataStr.substring(lastDash + 1, statusPos);
-  
-  // For debugging
-  char debugMsg[200];
-  snprintf(debugMsg, sizeof(debugMsg), 
-           "Received: name=%s, lat=%s, lon=%s, active=%s", 
-           name.c_str(), latStr.c_str(), lonStr.c_str(), activeStr.c_str());
-  pResponseCharacteristic->setValue(debugMsg);
-  pResponseCharacteristic->notify();
   
   double lat = latStr.toDouble();
   double lon = lonStr.toDouble();
   bool active = (activeStr == "ON");
   
-  // Store in first available slot or update existing
-  bool updated = false;
-  int slotIndex = -1;
-  
-  // First look for an existing slot with the same name
-  for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
-    if (bleLocations[i].name == name) {
-      slotIndex = i;
-      break;
+  if (type == "location") {
+    // Handle location point (1-5)
+    int index = name.substring(1).toInt() - 1; // Convert L1-L5 to 0-4
+    if (index >= 0 && index < MAX_LOCATION_POINTS) {
+      locationPoints[index].name = name;
+      locationPoints[index].lat = lat;
+      locationPoints[index].lon = lon;
+      locationPoints[index].active = active;
+      
+      // Save to EEPROM
+      int addr = LOCATION_POINTS_START + (index * LOCATION_POINT_SIZE);
+      EEPROM.put(addr, lat);
+      EEPROM.put(addr + 8, lon);
+      EEPROM.put(addr + 16, active ? (uint8_t)1 : (uint8_t)0);
+      EEPROM.commit();
+      
+      char response[100];
+      snprintf(response, sizeof(response), "Location point %s updated", name.c_str());
+      pResponseCharacteristic->setValue(response);
+      pResponseCharacteristic->notify();
     }
-  }
-  
-  // If not found, look for the first empty slot
-  if (slotIndex == -1) {
-    for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
-      if (bleLocations[i].name == "") {
-        slotIndex = i;
-        break;
+  } else if (type == "waypoint") {
+    // Handle waypoint (1-20)
+    int index = name.substring(1).toInt() - 1; // Convert W1-W20 to 0-19
+    if (index >= 0 && index < MAX_WAYPOINTS) {
+      bleLocations[index].name = name;
+      bleLocations[index].lat = lat;
+      bleLocations[index].lon = lon;
+      bleLocations[index].active = active;
+      
+      // Save to EEPROM using existing address scheme
+      int baseAddr;
+      // Waypoints W1-W5 (index 0-4) map to bleLocations[0] through bleLocations[4]
+      // These use addresses BLE_LOC1_LAT_ADDR through BLE_LOC5_LAT_ADDR
+      if (index < 5) { // Corresponds to W1-W5
+        // Base addresses for BLE_LOC1 to BLE_LOC5 are contiguous with a 17-byte step
+        baseAddr = BLE_LOC1_LAT_ADDR + (index * 17);
+      } else { // Corresponds to W6-W20 (index 5-19)
+        // Base addresses for BLE_LOC6 to BLE_LOC20 are contiguous with a 17-byte step
+        // (index - 5) maps current index (5-19) to a 0-14 range for offset calculation
+        baseAddr = BLE_LOC6_LAT_ADDR + ((index - 5) * 17);
       }
+      
+      EEPROM.put(baseAddr, lat);
+      EEPROM.put(baseAddr + 8, lon); // 8 bytes for double lat
+      EEPROM.put(baseAddr + 16, active ? (uint8_t)1 : (uint8_t)0); // 8 bytes for double lon, then 1 byte for active status
+      EEPROM.commit();
+      
+      char response[100];
+      snprintf(response, sizeof(response), "Waypoint %s updated", name.c_str());
+      pResponseCharacteristic->setValue(response);
+      pResponseCharacteristic->notify();
     }
   }
   
-  // If we found a slot, update it
-  if (slotIndex != -1) {
-    bleLocations[slotIndex].name = name;
-    bleLocations[slotIndex].lat = lat;
-    bleLocations[slotIndex].lon = lon;
-    bleLocations[slotIndex].active = active;
-    updated = true;
-    
-    // Save to EEPROM based on the location number
-    if (name == "1") {
-      EEPROM.put(BLE_LOC1_LAT_ADDR, lat);
-      EEPROM.put(BLE_LOC1_LON_ADDR, lon);
-      EEPROM.put(BLE_LOC1_ACTIVE_ADDR, active ? 1 : 0);
-    } 
-    else if (name == "2") {
-      EEPROM.put(BLE_LOC2_LAT_ADDR, lat);
-      EEPROM.put(BLE_LOC2_LON_ADDR, lon);
-      EEPROM.put(BLE_LOC2_ACTIVE_ADDR, active ? 1 : 0);
-    }
-    else if (name == "3") {
-      EEPROM.put(BLE_LOC3_LAT_ADDR, lat);
-      EEPROM.put(BLE_LOC3_LON_ADDR, lon);
-      EEPROM.put(BLE_LOC3_ACTIVE_ADDR, active ? 1 : 0);
-    }
-    else if (name == "4") {
-      EEPROM.put(BLE_LOC4_LAT_ADDR, lat);
-      EEPROM.put(BLE_LOC4_LON_ADDR, lon);
-      EEPROM.put(BLE_LOC4_ACTIVE_ADDR, active ? 1 : 0);
-    }
-    else if (name == "5") {
-      EEPROM.put(BLE_LOC5_LAT_ADDR, lat);
-      EEPROM.put(BLE_LOC5_LON_ADDR, lon);
-      EEPROM.put(BLE_LOC5_ACTIVE_ADDR, active ? 1 : 0);
-    }
-    
-    EEPROM.commit();
-    
-    // Force screen update after receiving location
-    lastUpdateTime = 0;
-    
-    // Vibrate to confirm receipt
-    digitalWrite(PIN_MOTOR, HIGH);
-    delay(100);
-    digitalWrite(PIN_MOTOR, LOW);
-  }
+  // Force screen update after receiving location
+  lastUpdateTime = 0;
   
-  // Send final response
-  delay(500); // Small delay to ensure debug message is sent first
-  
-  char response[100];
-  if (updated) {
-    if (active) {
-      snprintf(response, sizeof(response), "Location %s set at %.6f, %.6f (Active)", name.c_str(), lat, lon);
-    } else {
-      snprintf(response, sizeof(response), "Location %s disabled", name.c_str());
-    }
-  } else {
-    snprintf(response, sizeof(response), "No free locations. Clear one first.");
-  }
-  
-  pResponseCharacteristic->setValue(response);
-  pResponseCharacteristic->notify();
+  // Vibrate to confirm receipt
+  digitalWrite(PIN_MOTOR, HIGH);
+  delay(100);
+  digitalWrite(PIN_MOTOR, LOW);
 }
 
 void loop() {
@@ -874,25 +988,39 @@ void loop() {
 
 void updateGPSData() {
   bool dataChanged = false;
-  bool locationValid = gps.location.isValid(); // Check validity once
+  bool locationValid = gps.location.isValid();
 
   if (gps.location.isUpdated() && locationValid) {
     currentLat = gps.location.lat();
     currentLon = gps.location.lng();
     dataChanged = true;
 
-    // --- Detect Takeoff Point ---
-    if (!initialFixProcessed && homeSet) {
-      double initialDistance = TinyGPSPlus::distanceBetween(
-        currentLat, currentLon, homeLat, homeLon) / 1000.0; // Distance in KM
-      if (initialDistance > 0.5) { // More than 500 meters
+    // --- Update distances to points ---
+    if (homeSet) {
+      distanceToHome = TinyGPSPlus::distanceBetween(
+        currentLat, currentLon, homeLat, homeLon) / 1000.0;
+      courseToHome = TinyGPSPlus::courseTo(
+        currentLat, currentLon, homeLat, homeLon);
+      
+      // --- Set takeoff point if more than 500m from home ---
+      if (!takeoffSet && distanceToHome > 0.5) { // More than 500 meters from home
         takeoffLat = currentLat;
         takeoffLon = currentLon;
         takeoffSet = true;
+        
+        // Vibrate to indicate takeoff point set
+        digitalWrite(PIN_MOTOR, HIGH);
+        delay(200);
+        digitalWrite(PIN_MOTOR, LOW);
       }
-      initialFixProcessed = true;
     }
-    // --- End Detect Takeoff Point ---
+
+    if (takeoffSet) {
+      distanceToTakeoff = TinyGPSPlus::distanceBetween(
+        currentLat, currentLon, takeoffLat, takeoffLon) / 1000.0;
+      courseToTakeoff = TinyGPSPlus::courseTo(
+        currentLat, currentLon, takeoffLat, takeoffLon);
+    }
   }
 
   if (gps.altitude.isUpdated() && gps.altitude.isValid()) {
@@ -940,43 +1068,6 @@ void updateGPSData() {
         }
     }
   }
-
-  // --- Distance and Course to Home Calculation ---
-  if (homeSet && locationValid) { // Only calculate if home is set AND current location is valid
-    double newDistance = TinyGPSPlus::distanceBetween(
-      currentLat, currentLon, homeLat, homeLon) / 1000.0; // Distance in KM
-
-    double newCourseToHome = TinyGPSPlus::courseTo(
-      currentLat, currentLon, homeLat, homeLon);
-
-    if (fabs(newDistance - distanceToHome) > DISTANCE_CHANGE_THRESHOLD) {
-      distanceToHome = newDistance;
-      prevDistance = distanceToHome; // Update previous value only when a change occurs
-      dataChanged = true;
-    }
-
-    if (fabs(newCourseToHome - courseToHome) > HEADING_CHANGE_THRESHOLD) {
-      courseToHome = newCourseToHome;
-      dataChanged = true;
-    }
-  }
-
-  // --- Distance and Course to Takeoff Calculation ---
-  if (takeoffSet && locationValid) { // Only calculate if takeoff is set AND current location is valid
-    double newDistanceToTakeoff = TinyGPSPlus::distanceBetween(
-      currentLat, currentLon, takeoffLat, takeoffLon) / 1000.0; // Distance in KM
-
-    double newCourseToTakeoff = TinyGPSPlus::courseTo(
-      currentLat, currentLon, takeoffLat, takeoffLon);
-
-    if (fabs(newDistanceToTakeoff - distanceToTakeoff) > DISTANCE_CHANGE_THRESHOLD) {
-      distanceToTakeoff = newDistanceToTakeoff;
-    }
-
-    if (fabs(newCourseToTakeoff - courseToTakeoff) > HEADING_CHANGE_THRESHOLD) {
-      courseToTakeoff = newCourseToTakeoff;
-    }
-  }
 }
 
 void updateCenterDisplay() {
@@ -989,22 +1080,111 @@ void updateCenterDisplay() {
     display.setFont(&FreeMonoBold9pt7b);
   } else {
     if (homeSet) {
-      char buffer[10];
-      if (selectedLocationDistance < 0.5) {
+      if (currentNavMode == NAV_WAYPOINT) {
+        // --- Improved cycling logic: show each for 5 seconds ---
+        // Determine how many items to cycle
+        bool hasValidWaypoint = (currentWaypoint >= 0 && currentWaypoint < MAX_WAYPOINTS && bleLocations[currentWaypoint].active);
+        int maxItems = 1; // Always show Home
+        if (takeoffSet) maxItems++;
+        if (hasValidWaypoint) maxItems += 2; // Waypoint + Route Total
+
+        // Only increment currentSelectedIcon after ICON_CYCLE_INTERVAL
+        if (millis() - lastIconChangeTime >= ICON_CYCLE_INTERVAL) {
+          lastIconChangeTime = millis();
+          currentSelectedIcon = (currentSelectedIcon + 1) % maxItems;
+        }
+
+        // Set display based on current state
+        int iconIdx = 0;
+        if (currentSelectedIcon == iconIdx) {
+          selectedLocationDistance = distanceToHome;
+          selectedLocationLabel = "H";
+        } else if (takeoffSet && currentSelectedIcon == ++iconIdx) {
+          selectedLocationDistance = distanceToTakeoff;
+          selectedLocationLabel = "T";
+        } else if (hasValidWaypoint && currentSelectedIcon == ++iconIdx) {
+          selectedLocationDistance = TinyGPSPlus::distanceBetween(
+            currentLat, currentLon,
+            bleLocations[currentWaypoint].lat,
+            bleLocations[currentWaypoint].lon) / 1000.0;
+          selectedLocationLabel = "W" + String(currentWaypoint + 1);
+        } else if (hasValidWaypoint && currentSelectedIcon == ++iconIdx) {
+          selectedLocationDistance = calculateRemainingRouteDistance(currentWaypoint);
+          selectedLocationLabel = "RT";
+        }
+
+        // Format distance for display
+        char buffer[10];
+        if (selectedLocationDistance < 0.5) {
           int distMeters = (int)round(selectedLocationDistance * 1000.0);
           sprintf(buffer, "%d", distMeters);
           isMeters = true;
-      } else if (selectedLocationDistance >= 1000.0) {
+        } else if (selectedLocationDistance >= 1000.0) {
           int distKm = (int)round(selectedLocationDistance);
           sprintf(buffer, "%d", distKm);
           isMeters = false;
-      } else {
+        } else {
           dtostrf(selectedLocationDistance, 5, 1, buffer);
           isMeters = false;
+        }
+        centerText = String(buffer);
+        display.setFont(&tahoma20pt7b);
+        useDistanceFont = true;
+      } else {
+        // Improved location mode display logic: cycle through Home, Takeoff (if set), and all active location points
+        struct LocationDisplayItem {
+          double distance;
+          String label;
+        };
+        LocationDisplayItem items[MAX_LOCATION_POINTS + 2]; // H, T, L1-L5
+        int itemCount = 0;
+        // Always add Home
+        items[itemCount++] = {distanceToHome, "H"};
+        // Add Takeoff if set
+        if (takeoffSet) {
+          items[itemCount++] = {distanceToTakeoff, "T"};
+        }
+        // Only add L1-L5 if navigation is enabled
+        if (navigationEnabled) {
+          for (int i = 0; i < MAX_LOCATION_POINTS; i++) {
+            if (locationPoints[i].active) {
+              double dist = TinyGPSPlus::distanceBetween(
+                currentLat, currentLon,
+                locationPoints[i].lat,
+                locationPoints[i].lon) / 1000.0;
+              items[itemCount++] = {dist, "L" + String(i + 1)};
+            }
+          }
+        }
+        if (itemCount == 0) {
+          // Fallback: just show Home
+          items[itemCount++] = {distanceToHome, "H"};
+        }
+        // Cycle through items every 5 seconds
+        if (millis() - lastIconChangeTime >= ICON_CYCLE_INTERVAL) {
+          lastIconChangeTime = millis();
+          currentSelectedIcon = (currentSelectedIcon + 1) % itemCount;
+        }
+        selectedLocationDistance = items[currentSelectedIcon].distance;
+        selectedLocationLabel = items[currentSelectedIcon].label;
+        // Format distance for display
+        char buffer[10];
+        if (selectedLocationDistance < 0.5) {
+          int distMeters = (int)round(selectedLocationDistance * 1000.0);
+          sprintf(buffer, "%d", distMeters);
+          isMeters = true;
+        } else if (selectedLocationDistance >= 1000.0) {
+          int distKm = (int)round(selectedLocationDistance);
+          sprintf(buffer, "%d", distKm);
+          isMeters = false;
+        } else {
+          dtostrf(selectedLocationDistance, 5, 1, buffer);
+          isMeters = false;
+        }
+        centerText = String(buffer);
+        display.setFont(&tahoma20pt7b);
+        useDistanceFont = true;
       }
-      centerText = String(buffer);
-      display.setFont(&tahoma20pt7b);
-      useDistanceFont = true;
     } else {
       centerText = "No Home";
       display.setFont(&FreeMonoBold9pt7b);
@@ -1012,59 +1192,63 @@ void updateCenterDisplay() {
   }
 
   if (centerText.length() > 0) {
-      int16_t tbx, tby; uint16_t tbw, tbh;
-      if (useDistanceFont) display.setFont(&tahoma20pt7b);
-      else display.setFont(&FreeMonoBold9pt7b);
-      display.getTextBounds(centerText, 0, 0, &tbx, &tby, &tbw, &tbh);
+    int16_t tbx, tby; uint16_t tbw, tbh;
+    if (useDistanceFont) display.setFont(&tahoma20pt7b);
+    else display.setFont(&FreeMonoBold9pt7b);
+    display.getTextBounds(centerText, 0, 0, &tbx, &tby, &tbw, &tbh);
 
-      int textX;
-      int distY = CENTER_Y + tbh / 2 - 15;
+    int textX;
+    int distY = CENTER_Y + tbh / 2 - 15;
 
-      int decimalPos = centerText.indexOf('.');
-      if (useDistanceFont && !isMeters && decimalPos != -1) {
-          String beforeDecimal = centerText.substring(0, decimalPos);
-          int16_t btbx, btby; uint16_t btw, bth;
-          display.getTextBounds(beforeDecimal, 0, 0, &btbx, &btby, &btw, &bth);
-          textX = CENTER_X - btw;
-      } else {
-          textX = CENTER_X - tbw / 2;
+    int decimalPos = centerText.indexOf('.');
+    if (useDistanceFont && !isMeters && decimalPos != -1) {
+      String beforeDecimal = centerText.substring(0, decimalPos);
+      int16_t btbx, btby; uint16_t btw, bth;
+      display.getTextBounds(beforeDecimal, 0, 0, &btbx, &btby, &btw, &bth);
+      textX = CENTER_X - btw;
+    } else {
+      textX = CENTER_X - tbw / 2;
+    }
+
+    display.setCursor(textX, distY);
+    display.setTextColor(GxEPD_BLACK);
+    display.print(centerText);
+
+    if (useDistanceFont && !waitingForGPS && selectedLocationLabel.length() > 0) {
+      // Show location label (H, T, Wx, or RT)
+      display.setFont(&FreeMonoBold9pt7b);
+      String locText = "To " + selectedLocationLabel;
+      if (selectedLocationLabel == "RT") {
+        locText = "Route"; // Just show "Route" for total distance
       }
+      
+      int16_t ltbx, ltby; uint16_t ltbw, ltbh;
+      display.getTextBounds(locText, 0, 0, &ltbx, &ltby, &ltbw, &ltbh);
+      
+      int locX = CENTER_X - ltbw / 2;
+      int locY = distY - tbh - 5;
+      
+      display.setCursor(locX, locY);
+      display.print(locText);
+    }
 
-      display.setCursor(textX, distY);
-      display.setTextColor(GxEPD_BLACK);
-      display.print(centerText);
+    // Show current speed at the bottom
+    if (useDistanceFont) {
+      char speedBuffer[10];
+      int speedInt = (int)round(gps.speed.kmph());
+      sprintf(speedBuffer, "%d", speedInt);
+      String speedText = String(speedBuffer);
 
-      if (useDistanceFont && !waitingForGPS && selectedLocationLabel.length() > 0) {
-          display.setFont(&FreeMonoBold9pt7b);
-          String locText = "To " + selectedLocationLabel;
-          
-          int16_t ltbx, ltby; uint16_t ltbw, ltbh;
-          display.getTextBounds(locText, 0, 0, &ltbx, &ltby, &ltbw, &ltbh);
-          
-          int locX = CENTER_X - ltbw / 2;
-          int locY = distY - tbh - 5;
-          
-          display.setCursor(locX, locY);
-          display.print(locText);
-      }
+      display.setFont(&tahoma20pt7b);
+      int16_t stbx, stby; uint16_t stbw, stbh;
+      display.getTextBounds(speedText, 0, 0, &stbx, &stby, &stbw, &stbh);
 
-      if (useDistanceFont) {
-          char speedBuffer[10];
-          int speedInt = (int)round(gps.speed.kmph());
-          sprintf(speedBuffer, "%d", speedInt);
-          String speedText = String(speedBuffer);
+      int speedX = CENTER_X - stbw / 2;
+      int speedY = distY + tbh + 15;
 
-          display.setFont(&tahoma20pt7b);
-          int16_t stbx, stby; uint16_t stbw, stbh;
-          display.getTextBounds(speedText, 0, 0, &stbx, &stby, &stbw, &stbh);
-
-          int speedX = CENTER_X - stbw / 2;
-          int speedY = distY + tbh + 15;
-
-          display.setCursor(speedX, speedY);
-          display.print(speedText);
-      }
-
+      display.setCursor(speedX, speedY);
+      display.print(speedText);
+    }
   }
 }
 
@@ -1141,324 +1325,264 @@ void updateTextArea(int x, int y, int w, int h, char* text, int textX, int textY
 }
 
 void updateNavigationIndicators() {
-  // --- Define collision detection variables ---
-  const int COLLISION_DISTANCE = 20; // Reduced from 30 to 20 pixels - allows icons to be closer together
+  const int COLLISION_DISTANCE = 20;
   
-  // Arrays to store calculated positions and visibility of indicators
-  int iconX[MAX_BLE_LOCATIONS + 2] = {0}; // +2 for Home and Takeoff
-  int iconY[MAX_BLE_LOCATIONS + 2] = {0};
-  bool iconVisible[MAX_BLE_LOCATIONS + 2] = {false};
-  String iconLabels[MAX_BLE_LOCATIONS + 2];
-  double iconDistances[MAX_BLE_LOCATIONS + 2] = {0.0}; // Store distance to each icon
+  int iconX[MAX_BLE_LOCATIONS + MAX_LOCATION_POINTS + 2] = {0};
+  int iconY[MAX_BLE_LOCATIONS + MAX_LOCATION_POINTS + 2] = {0};
+  bool iconVisible[MAX_BLE_LOCATIONS + MAX_LOCATION_POINTS + 2] = {false};
+  String iconLabels[MAX_BLE_LOCATIONS + MAX_LOCATION_POINTS + 2];
+  double iconDistances[MAX_BLE_LOCATIONS + MAX_LOCATION_POINTS + 2] = {0.0};
   
   int numIcons = 0;
-  int visibleIconCount = 0; // Count how many icons are visible
-  
-  // --- Home Indicator ---
+  int visibleIconCount = 0;
+
+  // --- Home Indicator (always shown) ---
   float relativeBearingHome = courseToHome - currentCourse;
   if (relativeBearingHome < 0) relativeBearingHome += 360;
   if (relativeBearingHome >= 360) relativeBearingHome -= 360;
 
   float radiansHome = relativeBearingHome * PI / 180.0;
-
-  // Calculate icon position - moved out 1px
-  int iconRadiusHome = INNER_RADIUS + 16; // Fixed radius (was 15)
+  int iconRadiusHome = INNER_RADIUS + 16;
   iconX[numIcons] = CENTER_X + int(iconRadiusHome * sin(radiansHome));
   iconY[numIcons] = CENTER_Y - int(iconRadiusHome * cos(radiansHome));
   
   // Check if home icon is too close to center
   if (abs(iconX[numIcons] - CENTER_X) < 5 && abs(iconY[numIcons] - CENTER_Y) < 5) {
-    // For North/South (0/180 degrees)
     if (abs(sin(radiansHome)) < 0.1) {
-      // If cos is negative, it's toward South
       if (cos(radiansHome) < 0) {
-        iconY[numIcons] = CENTER_Y + iconRadiusHome; // South
+        iconY[numIcons] = CENTER_Y + iconRadiusHome;
       } else {
-        iconY[numIcons] = CENTER_Y - iconRadiusHome; // North
+        iconY[numIcons] = CENTER_Y - iconRadiusHome;
       }
-    } 
-    // For East/West (90/270 degrees)
-    else if (abs(cos(radiansHome)) < 0.1) {
-      // If sin is positive, it's toward East
+    } else if (abs(cos(radiansHome)) < 0.1) {
       if (sin(radiansHome) > 0) {
-        iconX[numIcons] = CENTER_X + iconRadiusHome; // East
+        iconX[numIcons] = CENTER_X + iconRadiusHome;
       } else {
-        iconX[numIcons] = CENTER_X - iconRadiusHome; // West
+        iconX[numIcons] = CENTER_X - iconRadiusHome;
       }
-    }
-    // For any other direction, place icon on the ring at 45 degrees
-    else {
-      iconX[numIcons] = CENTER_X + int(iconRadiusHome * 0.7071); // sqrt(2)/2 = ~0.7071
+    } else {
+      iconX[numIcons] = CENTER_X + int(iconRadiusHome * 0.7071);
       iconY[numIcons] = CENTER_Y - int(iconRadiusHome * 0.7071);
     }
   }
   
-  iconVisible[numIcons] = true;  // Home is always visible
+  iconVisible[numIcons] = true;
   iconLabels[numIcons] = "H";
   iconDistances[numIcons] = distanceToHome;
   int homeIconIndex = numIcons;
   numIcons++;
   visibleIconCount++;
 
-  // --- Takeoff Indicator ---
+  // --- Takeoff Indicator (if set) ---
   if (takeoffSet) {
     float relativeBearingTakeoff = courseToTakeoff - currentCourse;
     if (relativeBearingTakeoff < 0) relativeBearingTakeoff += 360;
     if (relativeBearingTakeoff >= 360) relativeBearingTakeoff -= 360;
 
     float radiansTakeoff = relativeBearingTakeoff * PI / 180.0;
-
-    int iconRadiusTakeoff = INNER_RADIUS + 16; // Fixed radius
+    int iconRadiusTakeoff = INNER_RADIUS + 16;
     iconX[numIcons] = CENTER_X + int(iconRadiusTakeoff * sin(radiansTakeoff));
     iconY[numIcons] = CENTER_Y - int(iconRadiusTakeoff * cos(radiansTakeoff));
     
-    // Check if takeoff icon is too close to center
     if (abs(iconX[numIcons] - CENTER_X) < 5 && abs(iconY[numIcons] - CENTER_Y) < 5) {
-      // For North/South (0/180 degrees)
       if (abs(sin(radiansTakeoff)) < 0.1) {
-        // If cos is negative, it's toward South
         if (cos(radiansTakeoff) < 0) {
-          iconY[numIcons] = CENTER_Y + iconRadiusTakeoff; // South
+          iconY[numIcons] = CENTER_Y + iconRadiusTakeoff;
         } else {
-          iconY[numIcons] = CENTER_Y - iconRadiusTakeoff; // North
+          iconY[numIcons] = CENTER_Y - iconRadiusTakeoff;
         }
-      } 
-      // For East/West (90/270 degrees)
-      else if (abs(cos(radiansTakeoff)) < 0.1) {
-        // If sin is positive, it's toward East
+      } else if (abs(cos(radiansTakeoff)) < 0.1) {
         if (sin(radiansTakeoff) > 0) {
-          iconX[numIcons] = CENTER_X + iconRadiusTakeoff; // East
+          iconX[numIcons] = CENTER_X + iconRadiusTakeoff;
         } else {
-          iconX[numIcons] = CENTER_X - iconRadiusTakeoff; // West
+          iconX[numIcons] = CENTER_X - iconRadiusTakeoff;
         }
-      }
-      // For any other direction, place icon on the ring at 45 degrees
-      else {
+      } else {
         iconX[numIcons] = CENTER_X + int(iconRadiusTakeoff * 0.7071);
         iconY[numIcons] = CENTER_Y + int(iconRadiusTakeoff * 0.7071);
       }
     }
     
-    iconVisible[numIcons] = true;  // Takeoff is visible if set
+    iconVisible[numIcons] = true;
     iconLabels[numIcons] = "T";
     iconDistances[numIcons] = distanceToTakeoff;
     int takeoffIconIndex = numIcons;
     numIcons++;
     visibleIconCount++;
   }
-  
-  // --- BLE Location Indicators ---
-  int bleIconIndices[MAX_BLE_LOCATIONS];
-  
-  for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
-    if (bleLocations[i].name != "" && bleLocations[i].active) {
-      // Calculate distance and bearing to the BLE location
-      double distToLocation = TinyGPSPlus::distanceBetween(
-        currentLat, currentLon, bleLocations[i].lat, bleLocations[i].lon) / 1000.0; // Distance in KM
-      
-      double courseToLocation = TinyGPSPlus::courseTo(
-        currentLat, currentLon, bleLocations[i].lat, bleLocations[i].lon);
-      
-      // Calculate relative bearing
-      float relativeBearingLocation = courseToLocation - currentCourse;
-      if (relativeBearingLocation < 0) relativeBearingLocation += 360;
-      if (relativeBearingLocation >= 360) relativeBearingLocation -= 360;
-      
-      float radiansLocation = relativeBearingLocation * PI / 180.0;
-      
-      // Calculate icon position with fixed radius - ensures consistent distance from center
-      int iconRadiusLocation = INNER_RADIUS + 16; // Fixed radius, same as other icons
-      iconX[numIcons] = CENTER_X + int(iconRadiusLocation * sin(radiansLocation));
-      iconY[numIcons] = CENTER_Y - int(iconRadiusLocation * cos(radiansLocation));
-      
-      // Check if BLE location icon is too close to center
-      if (abs(iconX[numIcons] - CENTER_X) < 8 || abs(iconY[numIcons] - CENTER_Y) < 8) {
-        // For North/South (0/180 degrees) - use tighter check for angles
-        if (abs(sin(radiansLocation)) < 0.2) {
-          // If cos is negative, it's toward South
-          if (cos(radiansLocation) < 0) {
-            iconY[numIcons] = CENTER_Y + iconRadiusLocation; // South
-            iconX[numIcons] = CENTER_X; // Exactly at center X
-          } else {
-            iconY[numIcons] = CENTER_Y - iconRadiusLocation; // North
-            iconX[numIcons] = CENTER_X; // Exactly at center X
+
+  if (navigationEnabled) {
+    if (currentNavMode == NAV_WAYPOINT) {
+      // Validate current waypoint is within bounds
+      if (currentWaypoint >= 0 && currentWaypoint < MAX_WAYPOINTS) {
+        // Show only valid and active waypoint
+        if (bleLocations[currentWaypoint].active) {
+          double distToWaypoint = TinyGPSPlus::distanceBetween(
+            currentLat, currentLon, 
+            bleLocations[currentWaypoint].lat, 
+            bleLocations[currentWaypoint].lon) / 1000.0;
+
+          // If within range, move to next active waypoint
+          if (distToWaypoint <= WAYPOINT_REACHED_DISTANCE) {
+            // Find next active waypoint
+            int nextWaypoint = currentWaypoint;
+            bool foundNext = false;
+            
+            // Only look for next waypoint up to MAX_WAYPOINTS
+            for (int i = 1; i < MAX_WAYPOINTS; i++) {
+              int checkPoint = (currentWaypoint + i) % MAX_WAYPOINTS;
+              if (bleLocations[checkPoint].active) {
+                nextWaypoint = checkPoint;
+                foundNext = true;
+                break;
+              }
+            }
+
+            if (foundNext) {
+              currentWaypoint = nextWaypoint;
+              EEPROM.put(CURRENT_WAYPOINT_ADDR, currentWaypoint);
+              EEPROM.commit();
+
+              // Vibrate to indicate waypoint reached
+              digitalWrite(PIN_MOTOR, HIGH);
+              delay(200);
+              digitalWrite(PIN_MOTOR, LOW);
+            }
           }
-        } 
-        // For East/West (90/270 degrees)
-        else if (abs(cos(radiansLocation)) < 0.2) {
-          // If sin is positive, it's toward East
-          if (sin(radiansLocation) > 0) {
-            iconX[numIcons] = CENTER_X + iconRadiusLocation; // East
-            iconY[numIcons] = CENTER_Y; // Exactly at center Y
-          } else {
-            iconX[numIcons] = CENTER_X - iconRadiusLocation; // West
-            iconY[numIcons] = CENTER_Y; // Exactly at center Y
-          }
-        }
-        // For directions around 45/135/225/315 degrees
-        else {
-          // Determine quadrant and place in appropriate 45-degree position
-          if (sin(radiansLocation) > 0 && cos(radiansLocation) > 0) {
-            // First quadrant (NE)
-            iconX[numIcons] = CENTER_X + int(iconRadiusLocation * 0.7071);
-            iconY[numIcons] = CENTER_Y - int(iconRadiusLocation * 0.7071);
-          } else if (sin(radiansLocation) > 0 && cos(radiansLocation) < 0) {
-            // Second quadrant (SE)
-            iconX[numIcons] = CENTER_X + int(iconRadiusLocation * 0.7071);
-            iconY[numIcons] = CENTER_Y + int(iconRadiusLocation * 0.7071);
-          } else if (sin(radiansLocation) < 0 && cos(radiansLocation) < 0) {
-            // Third quadrant (SW)
-            iconX[numIcons] = CENTER_X - int(iconRadiusLocation * 0.7071);
-            iconY[numIcons] = CENTER_Y + int(iconRadiusLocation * 0.7071);
-          } else {
-            // Fourth quadrant (NW)
-            iconX[numIcons] = CENTER_X - int(iconRadiusLocation * 0.7071);
-            iconY[numIcons] = CENTER_Y - int(iconRadiusLocation * 0.7071);
-          }
+
+          // Calculate bearing to current waypoint
+          double courseToWaypoint = TinyGPSPlus::courseTo(
+            currentLat, currentLon,
+            bleLocations[currentWaypoint].lat,
+            bleLocations[currentWaypoint].lon);
+
+          float relativeBearing = courseToWaypoint - currentCourse;
+          if (relativeBearing < 0) relativeBearing += 360;
+          if (relativeBearing >= 360) relativeBearing -= 360;
+
+          float radians = relativeBearing * PI / 180.0;
+          int iconRadius = INNER_RADIUS + 16;
+          
+          iconX[numIcons] = CENTER_X + int(iconRadius * sin(radians));
+          iconY[numIcons] = CENTER_Y - int(iconRadius * cos(radians));
+          iconVisible[numIcons] = true;
+          iconLabels[numIcons] = "W" + String(currentWaypoint + 1);
+          iconDistances[numIcons] = distToWaypoint;
+          numIcons++;
+          visibleIconCount++;
         }
       }
-      
-      iconVisible[numIcons] = true;  // Initially assume it's visible
-      iconLabels[numIcons] = bleLocations[i].name;
-      iconDistances[numIcons] = distToLocation;
-      bleIconIndices[i] = numIcons;
-      numIcons++;
+    } else if (currentNavMode == NAV_LOCATION) {
+      // Show all active location points
+      for (int i = 0; i < MAX_LOCATION_POINTS; i++) {
+        if (locationPoints[i].name != "" && locationPoints[i].active) {
+          double distToLocation = TinyGPSPlus::distanceBetween(
+            currentLat, currentLon,
+            locationPoints[i].lat,
+            locationPoints[i].lon) / 1000.0;
+
+          double courseToLocation = TinyGPSPlus::courseTo(
+            currentLat, currentLon,
+            locationPoints[i].lat,
+            locationPoints[i].lon);
+
+          float relativeBearing = courseToLocation - currentCourse;
+          if (relativeBearing < 0) relativeBearing += 360;
+          if (relativeBearing >= 360) relativeBearing -= 360;
+
+          float radians = relativeBearing * PI / 180.0;
+          int iconRadius = INNER_RADIUS + 16;
+
+          iconX[numIcons] = CENTER_X + int(iconRadius * sin(radians));
+          iconY[numIcons] = CENTER_Y - int(iconRadius * cos(radians));
+          iconVisible[numIcons] = true;
+          iconLabels[numIcons] = "L" + String(i + 1);
+          iconDistances[numIcons] = distToLocation;
+          numIcons++;
+          visibleIconCount++;
+        }
+      }
     }
   }
+
+  // Draw all visible icons
+  int dotDrawRadius = 15; // Reverted to 15
+  display.setFont(&tahoma10pt7b); // Changed from tahoma15pt7b for better fit
   
-  // --- Check for collisions and prioritize visibility ---
-  // Priority: 1. Home, 2. Takeoff, 3. BLE locations
-  
-  // Start from the BLE locations and check if they collide with Home or Takeoff
-  for (int i = 0; i < MAX_BLE_LOCATIONS; i++) {
-    if (bleLocations[i].name != "" && bleLocations[i].active) {
-      int iconIndex = bleIconIndices[i];
+  // Check for collisions between all visible icons
+  for (int i = 0; i < numIcons; i++) {
+    if (!iconVisible[i]) continue;
+    
+    for (int j = i + 1; j < numIcons; j++) {
+      if (!iconVisible[j]) continue;
       
-      // Skip if this icon is already hidden for some reason
-      if (!iconVisible[iconIndex]) continue;
-      
-      // Check collision with Home
-      int dx = iconX[iconIndex] - iconX[homeIconIndex];
-      int dy = iconY[iconIndex] - iconY[homeIconIndex];
+      int dx = iconX[i] - iconX[j];
+      int dy = iconY[i] - iconY[j];
       int distance = sqrt(dx*dx + dy*dy);
       
       if (distance < COLLISION_DISTANCE) {
-        // Collision with Home - Home has priority, so hide this BLE location
-        iconVisible[iconIndex] = false;
-        continue;  // Skip the rest of this iteration
-      }
-      
-      // Check collision with Takeoff if applicable
-      if (takeoffSet) {
-        int takeoffIndex = homeIconIndex + 1;  // Assuming Takeoff is right after Home
-        dx = iconX[iconIndex] - iconX[takeoffIndex];
-        dy = iconY[iconIndex] - iconY[takeoffIndex];
-        distance = sqrt(dx*dx + dy*dy);
-        
-        if (distance < COLLISION_DISTANCE) {
-          // Collision with Takeoff - Takeoff has priority
-          iconVisible[iconIndex] = false;
+        // Prioritize Home and Takeoff icons
+        if (i <= 1) { // Home or Takeoff
+          iconVisible[j] = false;
           continue;
         }
-      }
-      
-      // Check collision with other BLE locations (those processed so far)
-      for (int j = 0; j < i; j++) {
-        if (bleLocations[j].name != "" && bleLocations[j].active) {
-          int otherIndex = bleIconIndices[j];
-          
-          // Skip if the other icon is hidden
-          if (!iconVisible[otherIndex]) continue;
-          
-          dx = iconX[iconIndex] - iconX[otherIndex];
-          dy = iconY[iconIndex] - iconY[otherIndex];
-          distance = sqrt(dx*dx + dy*dy);
-          
-          if (distance < COLLISION_DISTANCE) {
-            // Collision with another BLE location
-            // Give priority to the lower-numbered location
-            if (i > j) {
-              iconVisible[iconIndex] = false;
-            } else {
-              iconVisible[otherIndex] = false;
-            }
-            break; // No need to check further for this icon
-          }
+        if (j <= 1) { // Home or Takeoff
+          iconVisible[i] = false;
+          break;
         }
-      }
-      
-      // Increment the visible icon count if this one is visible
-      if (iconVisible[iconIndex]) {
-        visibleIconCount++;
-      }
-    }
-  }
-  
-  // --- Location cycling logic ---
-  hasMultipleLocations = (visibleIconCount > 1); // Enable cycling only if multiple locations are visible
-  
-  // Check if we need to cycle to next location icon
-  if (hasMultipleLocations && millis() - lastIconChangeTime > ICON_CYCLE_INTERVAL) {
-    lastIconChangeTime = millis();
-    
-    // Find the next visible icon
-    int initialSelectedIcon = currentSelectedIcon;
-    do {
-      currentSelectedIcon = (currentSelectedIcon + 1) % numIcons;
-      if (currentSelectedIcon == initialSelectedIcon) break; // Prevent infinite loop
-    } while (!iconVisible[currentSelectedIcon]);
-  }
-  
-  // If the current selected icon is not visible for some reason, select the first visible icon
-  if (!iconVisible[currentSelectedIcon] && numIcons > 0) {
-    for (int i = 0; i < numIcons; i++) {
-      if (iconVisible[i]) {
-        currentSelectedIcon = i;
-        break;
+        
+        // For other icons, adjust positions to prevent overlap
+        float angle = atan2(dy, dx);
+        int adjust = COLLISION_DISTANCE - distance;
+        
+        iconX[j] -= int(cos(angle) * adjust / 2);
+        iconY[j] -= int(sin(angle) * adjust / 2);
+        iconX[i] += int(cos(angle) * adjust / 2);
+        iconY[i] += int(sin(angle) * adjust / 2);
       }
     }
   }
   
-  // Draw all visible icons
-  int dotDrawRadius = 15;
-  display.setFont(&tahoma15pt7b);
-  
+  // Draw icons after collision adjustment
   for (int i = 0; i < numIcons; i++) {
     if (iconVisible[i]) {
       // Final safety check - ensure no icon is drawn at the center
       if (abs(iconX[i] - CENTER_X) < 4 && abs(iconY[i] - CENTER_Y) < 4) {
-        continue; // Skip this icon if it's at the center
+        continue;
       }
       
-      // Draw the icon - always black circle with white text
       display.fillCircle(iconX[i], iconY[i], dotDrawRadius, GxEPD_BLACK);
       display.setTextColor(GxEPD_WHITE);
       
-      // Draw the label inside the dot
       String labelChar = iconLabels[i];
       int16_t tbx, tby; uint16_t tbw, tbh;
       display.getTextBounds(labelChar, 0, 0, &tbx, &tby, &tbw, &tbh);
       
-      int textX = iconX[i] - tbw / 2 - tbx; // Center horizontally
-      int textY = iconY[i] + tbh / 2 - tby / 2 - 8; // Center vertically
+      // Adjust text position for better centering with smaller font
+      int textX = iconX[i] - tbw / 2 - tbx;
+      int textY = iconY[i] + tbh / 2 - tby / 2 - 4; // Adjusted from -8 to -4 for better vertical centering
       
       display.setCursor(textX, textY);
       display.print(labelChar);
     }
   }
   
-  // Pass the selected location's distance to be displayed in the center
-  if (numIcons > 0 && iconVisible[currentSelectedIcon]) {
-    // Update the global selected distance variable for center display
-    selectedLocationDistance = iconDistances[currentSelectedIcon];
-    selectedLocationLabel = iconLabels[currentSelectedIcon];
-  } else {
-    // Default to home if no icons are visible
+  // Update center display with selected location information
+  bool foundActiveLocation = false;
+  for (int i = 0; i < numIcons; i++) {
+    if (iconVisible[i]) {
+      selectedLocationDistance = iconDistances[i];
+      selectedLocationLabel = iconLabels[i];
+      foundActiveLocation = true;
+      break;
+    }
+  }
+  
+  if (!foundActiveLocation) {
     selectedLocationDistance = distanceToHome;
     selectedLocationLabel = "H";
   }
 
-  // Reset text color to black for other drawing elements
   display.setTextColor(GxEPD_BLACK);
 }
 
@@ -1522,8 +1646,6 @@ void setNewHomePoint() {
 
     // Clear takeoff indicator when new Home is set
     takeoffSet = false;
-    // Reset initial fix processing for takeoff detection
-    initialFixProcessed = false;
 
     EEPROM.put(HOME_LAT_ADDR, homeLat);
     EEPROM.put(HOME_LON_ADDR, homeLon);
@@ -1849,30 +1971,27 @@ void enterSettingsScreen() {
     bool adjustingLitres = true;
     unsigned long lastInteractionTime = millis();
     bool processed = true;
-    int settingStage = 0; // 0=Litres, 1=Burn Rate, 2=Visibility
+    int settingStage = 0; // 0=Litres, 1=Burn Rate, 2=Visibility, 3=Nav Mode
     int settingsLoopCounter = 0; // Add a counter for loop iterations
 
-    // Initial screen draw
-    display.setFont(&tahoma15pt7b);
+    // --- Adjusted for 5 rows ---
+    display.setFont(&tahoma10pt7b); // Use smaller font for settings
     display.fillScreen(GxEPD_WHITE);
 
-    // --- Even vertical spacing for 3 rows + 1 info row ---
-    const int numRows = 4;
-    const int topMargin = 30;
-    const int bottomMargin = 20;
-    const int usableHeight = SCREEN_HEIGHT - topMargin - bottomMargin;
-    const int rowSpacing = usableHeight / (numRows - 1);
-
-    int labelX = 5;    // X position for labels (far left)
-    int valueX = 120;  // X position for values
-
+    const int numRows = 5;
+    const int topMargin = 0;
+    const int bottomMargin = 0;
+    const int rowSpacing = SCREEN_HEIGHT / numRows;
+    const int yOffset = 20; // Move all lines down by 10px more
+    int labelX = 5;
+    int valueX = 140;
     int rowY[numRows];
     for (int i = 0; i < numRows; ++i) {
-        rowY[i] = topMargin + i * rowSpacing;
+        rowY[i] = yOffset + i * rowSpacing;
     }
-    // rowY[0]: Litres, rowY[1]: Burn, rowY[2]: Show, rowY[3]: Info
+    // rowY[0]: Litres, rowY[1]: Burn, rowY[2]: Show, rowY[3]: NavMode, rowY[4]: Info
 
-    // Draw all three options (labels and values)
+    // Draw all five options (labels and values)
     display.setCursor(labelX, rowY[0]);
     display.print("Litres:");
     display.setCursor(valueX, rowY[0]);
@@ -1888,81 +2007,101 @@ void enterSettingsScreen() {
     display.setCursor(valueX, rowY[2]);
     display.print(fuelDisplayVisible ? "Yes" : "No");
 
-    // Draw selection box only around the value that can be changed
-    int16_t val_x, val_y;
-    uint16_t val_w, val_h;
+    // --- New: Navigation Mode Row ---
+    display.setCursor(labelX, rowY[3]);
+    display.print("Nav Mode:");
+    display.setCursor(valueX, rowY[3]);
+    char navChar = 'N';
+    if (currentNavMode == NAV_WAYPOINT) navChar = 'W';
+    else if (currentNavMode == NAV_LOCATION) navChar = 'L';
+    display.print(navChar);
+
+    // --- Info row (Estimated Flight Time) ---
+    float estimatedFlightTime = (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0;
+    char flightTimeBuffer[20];
+    snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", estimatedFlightTime);
+    display.setCursor(labelX, rowY[4]);
+    display.print(flightTimeBuffer);
+    display.updateWindow(0, 0, 200, 200);
+
+    // --- Selection box logic ---
+    int16_t val_x, val_y; uint16_t val_w, val_h;
     switch (settingStage) {
-        case 0: // Litres
+        case 0:
             display.getTextBounds(String(fuelLitres, 1), valueX, rowY[0], &val_x, &val_y, &val_w, &val_h);
             display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
             break;
-        case 1: // Burn Rate
+        case 1:
             display.getTextBounds(String(fuelBurnRate, 1), valueX, rowY[1], &val_x, &val_y, &val_w, &val_h);
             display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
             break;
-        case 2: // Show
+        case 2:
             display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, rowY[2], &val_x, &val_y, &val_w, &val_h);
+            display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+            break;
+        case 3:
+            display.getTextBounds(String(navChar), valueX, rowY[3], &val_x, &val_y, &val_w, &val_h);
             display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
             break;
     }
 
-    // --- Display Estimated Flight Time ---
-    float estimatedFlightTime = (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0;
-    char flightTimeBuffer[20];
-    snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", estimatedFlightTime);
-    display.setCursor(labelX, rowY[3]);
-    display.print(flightTimeBuffer);
-    // --- End Estimated Flight Time Display ---
-
-    display.updateWindow(0, 0, 200, 200);
-
+    // --- Main settings loop ---
     while (true) {
         settingsLoopCounter++;
-
         if (!digitalRead(PIN_KEY)) {
             if (processed) {
                 processed = false;
                 lastInteractionTime = millis();
-
-                // Handle different settings based on stage
                 switch(settingStage) {
-                    case 0: // Litres
+                    case 0:
                         fuelLitres += 0.5;
                         if (fuelLitres > FUEL_MAX) fuelLitres = FUEL_MIN;
                         break;
-                    case 1: // Burn Rate
+                    case 1:
                         fuelBurnRate += 0.1;
                         if (fuelBurnRate > 5.5) fuelBurnRate = 3.0;
                         break;
-                    case 2: // Visibility
-                        fuelDisplayVisible = !fuelDisplayVisible; // Toggle visibility
+                    case 2:
+                        fuelDisplayVisible = !fuelDisplayVisible;
+                        break;
+                    case 3:
+                        // Cycle navigation mode: N -> W -> L -> N ...
+                        if (currentNavMode == NAV_OFF) currentNavMode = NAV_WAYPOINT;
+                        else if (currentNavMode == NAV_WAYPOINT) currentNavMode = NAV_LOCATION;
+                        else currentNavMode = NAV_OFF;
+                        EEPROM.put(LOCATION_MODE_ADDR, (uint8_t)currentNavMode);
+                        EEPROM.commit();
                         break;
                 }
-
                 // Quick vibration
                 digitalWrite(PIN_MOTOR, HIGH);
                 delayMicroseconds(30000);
                 digitalWrite(PIN_MOTOR, LOW);
-
-                // Update display immediately after change
+                // Redraw all
                 display.fillScreen(GxEPD_WHITE);
                 display.setCursor(labelX, rowY[0]);
                 display.print("Litres:");
                 display.setCursor(valueX, rowY[0]);
                 display.print(fuelLitres, 1);
-
                 display.setCursor(labelX, rowY[1]);
                 display.print("Burn:");
                 display.setCursor(valueX, rowY[1]);
                 display.print(fuelBurnRate, 1);
-
                 display.setCursor(labelX, rowY[2]);
                 display.print("Show:");
                 display.setCursor(valueX, rowY[2]);
-                const char* showText = fuelDisplayVisible ? "Yes" : "No";
-                display.print(showText);
-
-                // Draw selection box only around the value that can be changed
+                display.print(fuelDisplayVisible ? "Yes" : "No");
+                display.setCursor(labelX, rowY[3]);
+                display.print("Nav Mode:");
+                display.setCursor(valueX, rowY[3]);
+                navChar = 'N';
+                if (currentNavMode == NAV_WAYPOINT) navChar = 'W';
+                else if (currentNavMode == NAV_LOCATION) navChar = 'L';
+                display.print(navChar);
+                snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0);
+                display.setCursor(labelX, rowY[4]);
+                display.print(flightTimeBuffer);
+                // Selection box
                 switch (settingStage) {
                     case 0:
                         display.getTextBounds(String(fuelLitres, 1), valueX, rowY[0], &val_x, &val_y, &val_w, &val_h);
@@ -1976,46 +2115,46 @@ void enterSettingsScreen() {
                         display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, rowY[2], &val_x, &val_y, &val_w, &val_h);
                         display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
                         break;
+                    case 3:
+                        display.getTextBounds(String(navChar), valueX, rowY[3], &val_x, &val_y, &val_w, &val_h);
+                        display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+                        break;
                 }
-
-                // --- Update Estimated Flight Time ---
-                estimatedFlightTime = (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0;
-                snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", estimatedFlightTime);
-                display.setCursor(labelX, rowY[3]);
-                display.print(flightTimeBuffer);
-                // --- End Update Estimated Flight Time ---
-
                 display.updateWindow(0, 0, 200, 200);
             }
         } else {
             processed = true;
         }
-
-        // Check timeout
+        // Timeout to move to next setting
         if (millis() - lastInteractionTime > 5000) {
-            if (settingStage < 2) {
+            if (settingStage < 3) {
                 settingStage++;
                 lastInteractionTime = millis();
-
                 // Redraw with new selection box
                 display.fillScreen(GxEPD_WHITE);
-
                 display.setCursor(labelX, rowY[0]);
                 display.print("Litres:");
                 display.setCursor(valueX, rowY[0]);
                 display.print(fuelLitres, 1);
-
                 display.setCursor(labelX, rowY[1]);
                 display.print("Burn:");
                 display.setCursor(valueX, rowY[1]);
                 display.print(fuelBurnRate, 1);
-
                 display.setCursor(labelX, rowY[2]);
                 display.print("Show:");
                 display.setCursor(valueX, rowY[2]);
                 display.print(fuelDisplayVisible ? "Yes" : "No");
-
-                // Draw selection box only around the value that can be changed
+                display.setCursor(labelX, rowY[3]);
+                display.print("Nav Mode:");
+                display.setCursor(valueX, rowY[3]);
+                navChar = 'N';
+                if (currentNavMode == NAV_WAYPOINT) navChar = 'W';
+                else if (currentNavMode == NAV_LOCATION) navChar = 'L';
+                display.print(navChar);
+                snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0);
+                display.setCursor(labelX, rowY[4]);
+                display.print(flightTimeBuffer);
+                // Selection box
                 switch (settingStage) {
                     case 1:
                         display.getTextBounds(String(fuelBurnRate, 1), valueX, rowY[1], &val_x, &val_y, &val_w, &val_h);
@@ -2025,21 +2164,18 @@ void enterSettingsScreen() {
                         display.getTextBounds(fuelDisplayVisible ? "Yes" : "No", valueX, rowY[2], &val_x, &val_y, &val_w, &val_h);
                         display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
                         break;
+                    case 3:
+                        display.getTextBounds(String(navChar), valueX, rowY[3], &val_x, &val_y, &val_w, &val_h);
+                        display.drawRect(val_x - 4, val_y - 2, val_w + 8, val_h + 4, GxEPD_BLACK);
+                        break;
                 }
-
-                // --- Update Estimated Flight Time ---
-                estimatedFlightTime = (fuelBurnRate > 0) ? (fuelLitres / fuelBurnRate) : 0.0;
-                snprintf(flightTimeBuffer, sizeof(flightTimeBuffer), "Time: %.1f HRS", estimatedFlightTime);
-                display.setCursor(labelX, rowY[3]);
-                display.print(flightTimeBuffer);
-                // --- End Update Estimated Flight Time ---
-
                 display.updateWindow(0, 0, 200, 200);
             } else {
                 EEPROM.put(FUEL_LITRES_ADDR, fuelLitres);
                 EEPROM.put(FUEL_BURNRATE_ADDR, fuelBurnRate);
                 uint8_t visibleByte = fuelDisplayVisible ? 1 : 0;
                 EEPROM.put(FUEL_VISIBLE_ADDR, visibleByte);
+                EEPROM.put(LOCATION_MODE_ADDR, (uint8_t)currentNavMode);
                 EEPROM.commit();
                 ESP.restart();
             }
@@ -2077,4 +2213,73 @@ void drawCompassRose(int cx, int cy, int radius, float headingDegrees) {
         display.setCursor(tx - tbw / 2, ty + tbh / 2);
         display.print(points[i].label);
     }
+}
+
+// Calculate total remaining distance in waypoint route starting from a specific waypoint
+double calculateRemainingRouteDistance(int startWaypoint) {
+    double totalDistance = 0.0;
+    double lastLat = currentLat;
+    double lastLon = currentLon;
+    
+    // Helper lambda to check if coordinates are valid
+    auto isValidCoord = [](double lat, double lon) {
+        return !isnan(lat) && !isnan(lon) && lat != 0.0 && lon != 0.0;
+    };
+    
+    if (startWaypoint >= 0 && startWaypoint < MAX_WAYPOINTS && bleLocations[startWaypoint].active && isValidCoord(bleLocations[startWaypoint].lat, bleLocations[startWaypoint].lon)) {
+        if (!isValidCoord(lastLat, lastLon)) return 0.0;
+        totalDistance = TinyGPSPlus::distanceBetween(
+            lastLat, lastLon,
+            bleLocations[startWaypoint].lat,
+            bleLocations[startWaypoint].lon) / 1000.0;
+        lastLat = bleLocations[startWaypoint].lat;
+        lastLon = bleLocations[startWaypoint].lon;
+        bool foundNextWaypoint = false;
+        for (int i = startWaypoint + 1; i < MAX_WAYPOINTS; i++) {
+            if (bleLocations[i].active && isValidCoord(bleLocations[i].lat, bleLocations[i].lon)) {
+                totalDistance += TinyGPSPlus::distanceBetween(
+                    lastLat, lastLon,
+                    bleLocations[i].lat,
+                    bleLocations[i].lon) / 1000.0;
+                lastLat = bleLocations[i].lat;
+                lastLon = bleLocations[i].lon;
+                foundNextWaypoint = true;
+            }
+        }
+        if (!foundNextWaypoint && startWaypoint > 0) {
+            for (int i = 0; i < startWaypoint; i++) {
+                if (bleLocations[i].active && isValidCoord(bleLocations[i].lat, bleLocations[i].lon)) {
+                    totalDistance += TinyGPSPlus::distanceBetween(
+                        lastLat, lastLon,
+                        bleLocations[i].lat,
+                        bleLocations[i].lon) / 1000.0;
+                    lastLat = bleLocations[i].lat;
+                    lastLon = bleLocations[i].lon;
+                }
+            }
+        }
+    } else {
+        bool isFirstWaypoint = true;
+        for (int i = 0; i < MAX_WAYPOINTS; i++) {
+            if (bleLocations[i].active && isValidCoord(bleLocations[i].lat, bleLocations[i].lon)) {
+                if (isFirstWaypoint) {
+                    if (!isValidCoord(currentLat, currentLon)) return 0.0;
+                    totalDistance = TinyGPSPlus::distanceBetween(
+                        currentLat, currentLon,
+                        bleLocations[i].lat,
+                        bleLocations[i].lon) / 1000.0;
+                    isFirstWaypoint = false;
+                } else {
+                    totalDistance += TinyGPSPlus::distanceBetween(
+                        lastLat, lastLon,
+                        bleLocations[i].lat,
+                        bleLocations[i].lon) / 1000.0;
+                }
+                lastLat = bleLocations[i].lat;
+                lastLon = bleLocations[i].lon;
+            }
+        }
+    }
+    if (isnan(totalDistance) || totalDistance < 0.0) return 0.0;
+    return totalDistance;
 }
